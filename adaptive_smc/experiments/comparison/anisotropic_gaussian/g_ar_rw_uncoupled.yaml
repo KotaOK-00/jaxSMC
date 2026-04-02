@@ -1,0 +1,29 @@
+config_dim5:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 1000
+  sequential_repetitions: 100
+  parallel_repetitions: 1
+  target_ess: 0.9
+  dim: 5
+  OUTPUT_PATH: "./output_dim5_mean0/"
+  prefix: "config_dim5"
+  problem:
+    latent_dim: 1
+    tau: 0.5
+
+
+
+config_dim10:
+  run: No
+  num_parallel_chain: 100
+  num_mcmc_steps: 10000
+  sequential_repetitions: 100
+  parallel_repetitions: 1
+  target_ess: 0.9
+  dim: 10
+  OUTPUT_PATH: "./output_dim10_mean0_10000_latent_dim1/"
+  prefix: "output_dim10_mean0_10000_latent_dim1"
+  problem:
+    latent_dim: 1
+    tau: 0.393919298579168

@@ -1,0 +1,25 @@
+config_lm:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000 #10000
+  sequential_repetitions: 1
+  parallel_repetitions: 10
+  OUTPUT_PATH: "./output_low_memory_10000/"
+  prefix: "None"
+  low_memory: True
+  problem:
+    latent_dim: 0
+    tau: 0.393919298579168
+
+config_lm_high_dim:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000 #10000
+  sequential_repetitions: 5
+  parallel_repetitions: 2
+  OUTPUT_PATH: "./output_low_memory_10000/"
+  prefix: "None"
+  low_memory: True
+  problem:
+    latent_dim: 0
+    tau: 0.393919298579168

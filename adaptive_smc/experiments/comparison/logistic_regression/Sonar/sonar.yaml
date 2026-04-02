@@ -1,0 +1,45 @@
+prior:
+  run: No
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000
+  sequential_repetitions: 1
+  parallel_repetitions: 1
+  target_ess: No
+  tempering_length: 50
+  OUTPUT_PATH: "./output/"
+  prefix: "main"
+  low_memory: No
+  compress_output: Yes
+  problem:
+    base_measure: "prior"
+
+laplace:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000 #25000
+  sequential_repetitions: 50
+  parallel_repetitions: 2
+  target_ess: 0.5
+  tempering_length: 9
+  OUTPUT_PATH: "./output/"
+  prefix: "main"
+  low_memory: No
+  compress_output: Yes
+  problem:
+    base_measure_type: "laplace"
+
+
+debug:
+  run: False
+  num_parallel_chain: 10
+  num_mcmc_steps: 1000 #25000
+  sequential_repetitions: 1
+  parallel_repetitions: 1
+  target_ess: 0.5
+  tempering_length: 5
+  OUTPUT_PATH: "./output/"
+  prefix: "main"
+  low_memory: No
+  compress_output: Yes
+  problem:
+    base_measure_type: "laplace"

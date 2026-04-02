@@ -1,0 +1,15 @@
+config:
+  run: Yes
+  num_parallel_chain: 32
+  num_mcmc_steps: 8000
+  sequential_repetitions: 1
+  parallel_repetitions: 10
+  target_ess: 0.5
+  low_memory: False
+  b16: False
+  dim: 10
+  OUTPUT_PATH: "./rw_g_to_g_fig1/"
+  prefix: "config1"
+  problem:
+    tau: 0.33231239229804085054
+    latent_dim: 0

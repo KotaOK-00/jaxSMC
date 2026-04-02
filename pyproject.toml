@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxSMC"
+version = "0.1"
+description = "Sequential Monte Carlo (waste-free SMC and SMC) samplers implemented in JAX. Only tempering is supported."
+readme = "README.md"
+authors = [
+    { name = "Yvann Le Fay" }
+]
+license = { text = "MIT" }
+keywords = ["smc", "tempering", "monte-carlo", "gaussian", "bayesian-inference", "jax", "statistics", "machine-learning", "uncertainty-quantification"]
+
+dependencies = [
+    "scipy",
+    "blackjax",
+    "jax",
+    "jaxlib",
+    "numpy",
+    "scikit-learn",
+    "matplotlib",
+    "pyaml"
+]
+
+[project.optional-dependencies]
+
+experiments = [
+    "particles",
+    "matplotlib",
+    "pandas"
+]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]

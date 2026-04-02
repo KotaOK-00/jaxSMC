@@ -1,0 +1,1 @@
+This is the experiment file to recover the optimal trajectory for the autoregressive parameter (Sect. 5.1).

@@ -1,0 +1,27 @@
+config_lm_vanish_1_None:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000 #10000
+  sequential_repetitions: 1
+  parallel_repetitions: 10
+  OUTPUT_PATH: "./output_low_memory_10000/"
+  prefix: "vanish_None"
+  low_memory: True
+  problem:
+    vanishing_order_C: 0.5
+    vanishing_order_V: 0.
+    tau: 0.70710678118
+
+config_lm_vanish_1_None_high_dim:
+  run: Yes
+  num_parallel_chain: 10
+  num_mcmc_steps: 10000 #10000
+  sequential_repetitions: 5
+  parallel_repetitions: 2
+  OUTPUT_PATH: "./output_low_memory_10000/"
+  prefix: "vanish_None"
+  low_memory: True
+  problem:
+    vanishing_order_C: 0.5
+    vanishing_order_V: 0.
+    tau: 0.70710678118
