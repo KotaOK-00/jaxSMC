@@ -1,53 +1,23 @@
-config4_bimodal: #to rerun maybe
+config4_bimodal:
   run: Yes
   sequential_repetitions: 4
-  parallel_repetitions: 10000 
+  parallel_repetitions: 10000
   dim_list: [ 2 ]
-  factor_list: [1., 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3., 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.75, 3.8, 3.85, 3.9, 3.95, 4.] 
+  factor_list: [1., 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3., 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.75, 3.8, 3.85, 3.9, 3.95, 4.]
   num_parallel_chain: 20
   num_mcmc_steps: 100
-  heavy_factor: 0.5
-  mean: 0.5
-  key: 11
+  key: 0
   OUTPUT_PATH: "./dim2_20/"
   prefix: "_"
 
-ground_truth_config4_bimodal: #to rerun maybe
+ground_truth_config4_bimodal:
   run: No
   sequential_repetitions: 40
-  parallel_repetitions: 10000 
+  parallel_repetitions: 10000
   dim_list: [ 2 ]
   factor_list: [1.]
   num_parallel_chain: 20
   num_mcmc_steps: 100
-  heavy_factor: 0.5
-  mean: 0.5
-  key: 101
+  key: 0
   OUTPUT_PATH: "./dim2_20/"
   prefix: "same_m_ground_truth"
-
-config4gaussian: #to rerun maybe
-  run: No
-  sequential_repetitions: 10
-  parallel_repetitions: 20 
-  dim_list: [ 5 ]
-  factor_list: [1, 2, 3, 4]
-  num_parallel_chain: 1
-  num_mcmc_steps: 100
-  heavy_factor: 0.5
-  mean: 0.5
-  OUTPUT_PATH: "./power2WFgreedy_gaussian/"
-  prefix: "_"
-
-ground_truth_config4_gaussian: #to rerun maybe
-  run: No
-  sequential_repetitions: 10
-  parallel_repetitions: 20 
-  dim_list: [ 5 ]
-  factor_list: [1.]
-  num_parallel_chain: 20
-  num_mcmc_steps: 100
-  heavy_factor: 0.5
-  mean: 0.5
-  OUTPUT_PATH: "./power2WFgreedy_gaussian/"
-  prefix: "ground_truth"

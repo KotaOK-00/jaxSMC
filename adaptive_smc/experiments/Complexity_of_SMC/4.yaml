@@ -1,55 +1,39 @@
-config_median4:
-  run: No
-  sequential_repetitions: 16 # 16
-  parallel_repetitions: 125
-  dim_list: [ 1, 5, 10, 20, 50] #1, 5, 10, 20,
-  num_mcmc_steps: 20
-  heavy_factor: 0.5
-  mean: 0.
-  OUTPUT_PATH: "./power2WF/heavyfactor05/"
-  prefix: "_median"
-
-config4: #to rerun maybe
-  run: No
-  sequential_repetitions: 10 #10
-  parallel_repetitions: 20
-  dim_list: [1, 5, 10, 20] #1, 5, 10, 20, 
-  num_mcmc_steps: 200
-  heavy_factor: 0.5
-  mean: 0.
-  OUTPUT_PATH: "./power2WF/heavyfactor05/"
-  prefix: "_"
-  
-config_median5:
-  run: No
-  sequential_repetitions: 16
-  parallel_repetitions: 125
-  dim_list: [1, 5, 10, 20, 50]
-  num_mcmc_steps: 20
-  heavy_factor: 4.0
-  mean: 0.
-  OUTPUT_PATH: "./power2WF/heavyfactor4/"
-  prefix: "_median"
-
-config5:
-  run: No
-  sequential_repetitions: 10
-  parallel_repetitions: 20
-  dim_list: [1, 5, 10, 20, 50]
-  num_mcmc_steps: 200
-  heavy_factor: 4.0
-  mean: 0.
-  OUTPUT_PATH: "./power2WF/heavyfactor4/"
-  prefix: "_"
-
-config_test: #to rerun maybe
+config_median4: # Light-tailed distribution
   run: Yes
-  sequential_repetitions: 10
-  parallel_repetitions: 20 
-  dim_list: [ 20 ]
-  num_parallel_chain: 20
+  sequential_repetitions: 50
+  parallel_repetitions: 40
+  dim_list: [1, 5, 10, 20, 50]
   num_mcmc_steps: 20
+  OUTPUT_PATH: "./power2/heavyfactor05/"
   heavy_factor: 0.5
-  mean: 0.
-  OUTPUT_PATH: "./test/"
+  prefix: "_median"
+
+config4: # Light-tailed distribution
+  run: Yes
+  sequential_repetitions: 50
+  parallel_repetitions: 4
+  dim_list: [1, 5, 10, 20, 50]
+  num_mcmc_steps: 200
+  heavy_factor: 0.5
+  OUTPUT_PATH: "./power2/heavyfactor05/"
+  prefix: "_"
+
+config_median5: # Heavy-tailed distribution
+  run: Yes
+  sequential_repetitions: 50
+  parallel_repetitions: 40
+  dim_list: [1, 5, 10, 20, 50]
+  num_mcmc_steps: 20
+  OUTPUT_PATH: "./power2/heavyfactor4/"
+  heavy_factor: 4.0
+  prefix: "_median"
+
+config5: # Heavy-tailed distribution
+  run: Yes
+  sequential_repetitions: 50
+  parallel_repetitions: 4
+  dim_list: [1, 5, 10, 20, 50]
+  num_mcmc_steps: 200
+  heavy_factor: 4.0
+  OUTPUT_PATH: "./power2/heavyfactor4/"
   prefix: "_"
