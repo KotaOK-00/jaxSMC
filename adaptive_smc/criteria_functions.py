@@ -34,9 +34,13 @@ def mahalanobis(x: ArrayLike, y: ArrayLike, state: SMCStatebis, i: int, j: Optio
         r"""
         Compute the MH distance between x and y, using the covariance matrix estimated from x ~ \pi_{i-1}, and weights \pi_{i}/\pi_i
         """
-        _x = x.reshape(x.shape[0] * x.shape[1], 1)  # ~ \pi_{i-1}
-        _w = jnp.exp(state.log_weights.at[j].get().squeeze())
+        dim = x.shape[-1]
+        _x = x.reshape(-1, dim)  # ~ \pi_{i-1}
+        _w = jnp.exp(state.log_weights.at[j].get().reshape(-1))
         cov, _ = cov_estimate(_x, _w)
-        return jnp.einsum('...j,...k,...jk->...', x - y, x - y, jnp.linalg.inv(cov))
+        chol = jnp.linalg.cholesky(cov)
+        diff = (x - y).reshape(-1, dim)
+        z = jax.scipy.linalg.solve_triangular(chol, diff.T, lower=True)
+        return jnp.sum(jnp.square(z), axis=0).reshape(x.shape[:-1])
 
     return jax.lax.select(i == 0, jnp.sum(jnp.square(x - y), axis=-1), _mahalanobis(x, y))

@@ -14,10 +14,17 @@ def make_optimize_within_a_fixed_grid(grid: ArrayLike, batch_size=jnp.inf) -> Op
     We use apply_vmap_batch to apply the function to the grid in batches of fixed sizes (by default inf)
     """
 
-    def optimize_within_a_grid(func: Callable[[ArrayLike], ArrayLike], _: ArrayLike) -> ArrayLike:
+    def optimize_within_a_grid(func: Callable[[ArrayLike], ArrayLike], x: ArrayLike) -> ArrayLike:
         output_shape = func(grid.at[0].get()).shape
         fun_applied_to_grid = apply_vmap_batch(jax.vmap(func), grid, batch_size, output_shape)
-        return grid.at[jnp.argmax(fun_applied_to_grid, keepdims=True).at[0].get()].get()
+        best = grid.at[jnp.argmax(fun_applied_to_grid, keepdims=True).at[0].get()].get()
+        # If every grid point is masked (-inf, e.g. by the ESS guard), keep the previous parameter.
+        return jnp.where(jnp.any(jnp.isfinite(fun_applied_to_grid)), best, x)
+
+    # Exposed so that the SMC samplers can detect when this grid coincides with their
+    # criteria grid and reuse the already-computed criteria values instead of
+    # evaluating the objective on the grid a second time.
+    optimize_within_a_grid.grid = grid
 
     return optimize_within_a_grid
 
@@ -36,7 +43,9 @@ def make_optimize_within_a_grid(minmax: Tuple[float, float], interval: Tuple[flo
         grid = x + jnp.linspace(a, b, n_steps)
         grid = jnp.minimum(jnp.maximum(grid, my_min), my_max)
         fun_applied_to_grid = jax.vmap(func)(grid)
-        return grid.at[jnp.argmax(fun_applied_to_grid, keepdims=True).at[0].get()].get()
+        best = grid.at[jnp.argmax(fun_applied_to_grid, keepdims=True).at[0].get()].get()
+        # If every grid point is masked (-inf, e.g. by the ESS guard), keep the previous parameter.
+        return jnp.where(jnp.any(jnp.isfinite(fun_applied_to_grid)), best, x)
 
     return optimize_within_a_grid
 

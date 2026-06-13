@@ -27,7 +27,8 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                  fun_to_be_applied_to_the_mh_ratio_in_the_criteria=lambda x: x,
                  fun_to_be_applied_to_the_criteria=lambda x: x,
                  grid_criteria=jnp.linspace(0.01, 8, 100),
-                 batch_size_criteria=jnp.inf
+                 batch_size_criteria=jnp.inf,
+                 min_ess_fraction_criteria=0.05
                  ) -> None:
         r"""
         logbase_density_fn: (normalised) log density of a base measure \nu
@@ -47,6 +48,11 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             h = -(\cdot - 0.234)^2, yields a criteria that is maximised for an acceptance ratio of 0.234.
         grid_criteria: a fixed grid for the tuning-parameter space on which the criteria is computed.
         batch_size_criteria: the batch size to use when applying the function to compute the criteria on the grid.
+        min_ess_fraction_criteria: parameters \theta whose importance-sampling weights
+            \tilde{G}^{\theta_t, \theta} have an effective sample size below this fraction of N
+            are masked (criteria set to -inf): far from \theta_t the reweighting is heavy-tailed
+            (infinite variance for Gaussian RW once \theta > sqrt(2) \theta_t) and the argmax would
+            otherwise be driven by a handful of effective pairs. Set to 0 to disable.
         """
         self.logbase_density_fn = logbase_density_fn
         self.vmapped_logbase_density_fn = jnp.vectorize(logbase_density_fn, signature='(d)->()')
@@ -63,6 +69,24 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         self.fun_to_be_applied_to_the_criteria = fun_to_be_applied_to_the_criteria
         self.grid_criteria = grid_criteria
         self.batch_size_criteria = batch_size_criteria
+        self.min_ess_fraction_criteria = min_ess_fraction_criteria
+        # When the optimisation procedure is a fixed-grid search over the same grid as
+        # grid_criteria, the criteria values (computed anyway for logging) can be reused
+        # instead of evaluating the objective on the grid a second time.
+        optimisation_grid = getattr(optimisation, "grid", None)
+        self._reuse_criteria_grid = bool(
+            optimisation_grid is not None
+            and optimisation_grid.shape == grid_criteria.shape
+            and jnp.array_equal(optimisation_grid, grid_criteria)
+        )
+
+    def _tune_parameter(self, to_optimize, previous_parameter, criteria_row):
+        if self._reuse_criteria_grid:
+            best_idx = jnp.argmax(criteria_row, keepdims=True).at[0].get()
+            best = self.grid_criteria.at[best_idx].get()
+            # If every grid point is masked (ESS too low everywhere), keep the previous parameter.
+            return jnp.where(jnp.any(jnp.isfinite(criteria_row)), best, previous_parameter)
+        return self.optimisation(to_optimize, previous_parameter)
 
     def log_tgt_fn(self, lmbda):
         def _log_tgt_fn(x):
@@ -94,16 +118,18 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         def log_my_current_proposal(x, y):
             def _zero_proposal(x, y):
                 r"""
-                    q_1'(z, \dd z') = q_1(z, z') x \nu (dd z'), where \nu is the base measure (w.r.t to Lebesgue),
-                    where q_1' is the density (w.r.t to Lebesgue) of the first proposal, while q_1 is the
-                    density w.r.t to \nu (typically the prior)
-                    Thus at t = 0, the extended weight is \tilde{G}_0(z, z') = G_0(z) q_1(z, z') = G_0(z) q_1'(z, z')/\nu(z').
-                    Thus setting _zero_proposal(x, y) to be nu(y), and computing
-                    "log_weights_proposal - log_weights_current_proposal"
-                    is equivalent to compute log q_1'(z') - log \nu(z'), that is, log q_1(z, z'),
-                    which is the desired left term in the product for \tilde{G}_0(z, z').
+                    At t = 0, the initial proposals are drawn from q_1^{\theta_init}(x, \cdot)
+                    (see sample), so the extended weight is
+                    \tilde{G}_0(z, z') = G_0(z) q_1^{\theta}(z, z') / q_1^{\theta_init}(z, z').
+                    state.mh_proposal_parameters[0] still holds \theta_init when this function
+                    is built at t = 0, so the builder below evaluates the density the initial
+                    proposals were actually drawn from.
                 """
-                return self.logbase_density_fn(y)
+                return self.build_mh_proposal(
+                    state,
+                    self.log_tgt_fn(state.tempering_sequence.at[0].get()),
+                    self.log_likelihood_fn,
+                    1)[0](x, y)
 
             def _log_my_current_proposal(x, y):
                 r"""
@@ -157,8 +183,12 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                                log_current_tgt_density_new_proposed_particles - log_target_density_at_t_fn_particles + log_weights_proposal_inv - log_weights_proposal)
             acceptance_ratio = jnp.nan_to_num(jnp.exp(log_acceptance_ratio))
 
-            return self.fun_to_be_applied_to_the_criteria(
+            value = self.fun_to_be_applied_to_the_criteria(
                 jnp.sum(_weights * g * self.fun_to_be_applied_to_the_mh_ratio_in_the_criteria(acceptance_ratio)))
+            if self.min_ess_fraction_criteria > 0:
+                ess = 1.0 / jnp.sum(jnp.square(_weights))
+                value = jnp.where(ess >= self.min_ess_fraction_criteria * _weights.size, value, -jnp.inf)
+            return value
 
         return fun
 
@@ -173,15 +203,21 @@ class GenericAdaptiveWasteFreeTemperingSMC:
 
         Parameters
         ----------
+        self
+        key
         num_parallel_chain: M
         num_mcmc_steps: P
+        initial_mh_proposal_parameter
         target_ess: If set, the temperature at iteration t is adapted to target an ESS of target_ess at iteration t, that is, ESS(\{w_t^i\}_i) >= target_ess.
                 See Alg. 17.3 in "An introduction to Sequential Monte Carlo" by Nicolas Chopin and Omiros Papaspiliopoulos.
                 Otherwise, the temperatures are set to tempering_sequence
+        init_other
+
+        Returns
         -------
 
         """
-        iteration = len(tempering_sequence) - 1
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -191,20 +227,18 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         num_particles = num_parallel_chain * P
 
         subkey = jax.random.fold_in(key, 0)
-        subkeys = jax.random.split(subkey, (2 * num_parallel_chain, 2 * P))
+        key_init_particles, key_init_proposals = jax.random.split(subkey)
+        subkeys = jax.random.split(key_init_particles, (num_parallel_chain, P))
 
-        pair_init_particles = self.vmapped_base_measure_sampler(subkeys)
-        dim = pair_init_particles.shape[-1]
+        init_particles = self.vmapped_base_measure_sampler(subkeys)
+        dim = init_particles.shape[-1]
 
-        couple_particles = jnp.zeros((iteration + 1, 2, num_parallel_chain, P, dim))
-
-        init_particles = pair_init_particles.at[:num_parallel_chain, :P].get()
-        init_proposed_particles = pair_init_particles.at[num_parallel_chain:, P:].get()
-
-        couple_particles = couple_particles.at[0, 0].set(init_particles)
-        couple_particles = couple_particles.at[0, 1].set(init_proposed_particles)
+        particles = jnp.zeros((iteration + 1, num_parallel_chain, P, dim))
+        proposed_particles = jnp.zeros((iteration + 1, num_parallel_chain, P, dim))
+        particles = particles.at[0].set(init_particles)
 
         mh_proposal_parameters = jnp.zeros((iteration + 1, *initial_mh_proposal_parameter.shape))
+        mh_proposal_parameters = mh_proposal_parameters.at[0].set(initial_mh_proposal_parameter)
 
         log_normalizations = jnp.zeros((iteration + 1,))
         log_weights = jnp.zeros((iteration + 1, num_parallel_chain, P))
@@ -230,9 +264,30 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         others = jnp.zeros((iteration, *init_other.shape))
         others = others.at[0].set(init_other)
 
+        # Draw the initial proposals from q_1^{theta_init}(x, .) rather than from the base
+        # measure: the t = 0 extended weights then have the same ratio structure
+        # q^{theta} / q^{theta_init} as every later iteration, instead of the degenerate
+        # q^{theta}(x, y) / nu(y) with y ~ nu, which is supported by very few pairs.
+        init_state = SMCStatebis(
+            particles,
+            proposed_particles,
+            log_weights,
+            mh_proposal_parameters, tempering_sequence,
+            others
+        )
+        _init_log_proposal, init_proposal_sampler, _ = (
+            self.build_mh_proposal(init_state,
+                                   self.log_tgt_fn(tempering_sequence.at[0].get()),
+                                   self.log_likelihood_fn,
+                                   1))
+        proposal_keys = jax.random.split(key_init_proposals, (num_parallel_chain, P))
+        init_proposed_particles = jnp.vectorize(init_proposal_sampler, signature='(2),(d)->(d)')(
+            proposal_keys, init_particles)
+        proposed_particles = proposed_particles.at[0].set(init_proposed_particles)
+
         state = SMCStatebis(
-            couple_particles.at[:, 0].get(),
-            couple_particles.at[:, 1].get(),
+            particles,
+            proposed_particles,
             log_weights,
             mh_proposal_parameters, tempering_sequence,
             others
@@ -240,18 +295,16 @@ class GenericAdaptiveWasteFreeTemperingSMC:
 
         to_optimize = self.estimate_expectation_criteria_fun(state,
                                                              0)
-        criteria = criteria.at[0].set(apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
-                                                       self.batch_size_criteria))
+        criteria_row = apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
+                                        self.batch_size_criteria)
+        criteria = criteria.at[0].set(criteria_row)
 
-        new_mh_proposal_parameter = self.optimisation(
-            to_optimize,
-            initial_mh_proposal_parameter
-        )
+        new_mh_proposal_parameter = self._tune_parameter(to_optimize, initial_mh_proposal_parameter, criteria_row)
         mh_proposal_parameters = mh_proposal_parameters.at[0].set(new_mh_proposal_parameter)
 
         new_state = SMCStatebis(
-            couple_particles.at[:, 0].get(),
-            couple_particles.at[:, 1].get(),
+            particles,
+            proposed_particles,
             log_weights,
             mh_proposal_parameters, tempering_sequence,
             others
@@ -263,19 +316,22 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                    self.log_likelihood_fn,
                                    1))
         log_proposal = jnp.vectorize(_log_proposal, signature="(d),(d)->()")
+        log_init_proposal = jnp.vectorize(_init_log_proposal, signature="(d),(d)->()")
 
-        log_weights_proposal = log_proposal(init_particles, init_proposed_particles)
+        log_weights_proposal = log_proposal(init_particles, init_proposed_particles) - \
+            log_init_proposal(init_particles, init_proposed_particles)
         new_log_weights_couple = log_weights_proposal + log_weights.at[0].get()
         new_log_weights_couple, _ = normalize_log_weights(new_log_weights_couple)
         log_weights_couple = log_weights_couple.at[0].set(new_log_weights_couple)
 
-        def make_inner_loop(i: int, couple_particles: ArrayLike,
+        def make_inner_loop(i: int, particles: ArrayLike,
+                            proposed_particles: ArrayLike,
                             log_weights: ArrayLike,
                             mh_proposal_parameters: ArrayLike,
                             tempering_sequence: ArrayLike,
                             others: ArrayLike):
             log_target_density_at_t_minus_one_fn = self.log_tgt_fn(tempering_sequence.at[i - 1].get())
-            state = SMCStatebis(couple_particles.at[:, 0].get(), couple_particles.at[:, 1].get(),
+            state = SMCStatebis(particles, proposed_particles,
                                 log_weights, mh_proposal_parameters,
                                 tempering_sequence,
                                 others)
@@ -284,20 +340,21 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
-            def inside_body_fn(key, couple_particle):
-                # Resampling for the first iteration.
+            def inside_body_fn(key, particle):
                 subkey_0 = jax.random.fold_in(key, 0)
-                first_proposal = proposal_sampler(subkey_0, couple_particle.at[0].get())
-                couple_particle = couple_particle.at[1].set(first_proposal)
+                first_proposal = proposal_sampler(subkey_0, particle)
+                couple_particle = jnp.stack((particle, first_proposal))
 
                 _couple_particles = jnp.zeros((P, 2, dim))
                 _couple_particles = _couple_particles.at[0].set(couple_particle)
                 _acceptance_bools = jnp.zeros((num_mcmc_steps,), dtype=bool)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, couple_particles_across_p, acceptance_bool_across_p = carry
+                    key, couple_particles_across_p, acceptance_bool_across_p, log_density_particle = carry
                     couple_particle = couple_particles_across_p.at[p - 1].get()
 
                     particle = couple_particle.at[0].get()
@@ -306,32 +363,40 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                     subkey_p = jax.random.fold_in(key, p)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     acceptance_bool_across_p = acceptance_bool_across_p.at[p - 1].set(accept_MH_boolean)
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     new_proposed_particle = proposal_sampler(subkey_p, new_particle)
                     couple_particles_across_p = couple_particles_across_p.at[p, 0].set(new_particle)
                     couple_particles_across_p = couple_particles_across_p.at[p, 1].set(new_proposed_particle)
-                    return key, couple_particles_across_p, acceptance_bool_across_p
+                    return key, couple_particles_across_p, acceptance_bool_across_p, log_density_particle
 
-                _, _couple_particles, _acceptance_bools = jax.lax.fori_loop(
+                _, _couple_particles, _acceptance_bools, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _couple_particles,
-                        _acceptance_bools
+                        _acceptance_bools,
+                        init_log_density
                     )
                 )
                 return _couple_particles, _acceptance_bools
@@ -339,13 +404,12 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             return inside_body_fn
 
         def body_fn(i, carry):
-            couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = carry
+            particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = carry
             subkey = jax.random.fold_in(key, i)
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
-            resampled_couple_particles = couple_particles.at[i - 1].get().reshape((num_particles, 2, dim)).at[
+            key_resample, key_chains = jax.random.split(subkey)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
+            resampled_particles = particles.at[i - 1].get().reshape((num_particles, dim)).at[
                 ancestors].get()
-            particles = couple_particles.at[:, 0].get()
-            proposed_particles = couple_particles.at[:, 1].get()
             if target_ess:
                 _log_weights = self.vmapped_log_likelihood_fn(
                     particles.at[i - 1].get())  # do not use new_particles, this is wrong
@@ -357,7 +421,8 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                 diff_tempering_sequence = diff_tempering_sequence.at[i].set(dlmbda)
 
             inside_body_fn = make_inner_loop(i,
-                                             couple_particles,
+                                             particles,
+                                             proposed_particles,
                                              log_weights,
                                              mh_proposal_parameters,
                                              tempering_sequence,
@@ -377,14 +442,14 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                                  i)
             others = others.at[i].set(other)
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
-            new_couple_particles, new_acceptance_bools = inside_body_fn(keys, resampled_couple_particles)
+            new_couple_particles, new_acceptance_bools = inside_body_fn(keys, resampled_particles)
             acceptance_bools = acceptance_bools.at[i - 1].set(new_acceptance_bools)
             new_particles = new_couple_particles.at[..., 0, :].get()
             new_proposed_particles = new_couple_particles.at[..., 1, :].get()
-            couple_particles = couple_particles.at[i, 0].set(new_particles)
-            couple_particles = couple_particles.at[i, 1].set(new_proposed_particles)
+            particles = particles.at[i].set(new_particles)
+            proposed_particles = proposed_particles.at[i].set(new_proposed_particles)
             log_Gi_fn = self.vmapped_log_weights_fn(diff_tempering_sequence.at[i].get())
             new_log_weights = log_Gi_fn(new_particles)
             new_log_weights, log_normalization = normalize_log_weights(new_log_weights)
@@ -392,19 +457,18 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             log_weights = log_weights.at[i].set(new_log_weights)
 
             new_state = SMCStatebis(
-                couple_particles.at[:, 0].get(),
-                couple_particles.at[:, 1].get(),
+                particles,
+                proposed_particles,
                 log_weights,
                 mh_proposal_parameters, tempering_sequence, others
             )
 
             to_optimize = self.estimate_expectation_criteria_fun(new_state, i)
-            new_mh_proposal_parameter = self.optimisation(
-                to_optimize,
-                mh_proposal_parameters.at[i - 1].get()
-            )
-            criteria = criteria.at[i].set(apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
-                                                           self.batch_size_criteria))
+            criteria_row = apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
+                                            self.batch_size_criteria)
+            criteria = criteria.at[i].set(criteria_row)
+            new_mh_proposal_parameter = self._tune_parameter(to_optimize, mh_proposal_parameters.at[i - 1].get(),
+                                                             criteria_row)
             mh_proposal_parameters = mh_proposal_parameters.at[i].set(new_mh_proposal_parameter)
 
             new_state = SMCStatebis(
@@ -436,15 +500,16 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             new_log_weights_couple, _ = normalize_log_weights(new_log_weights_couple)
             log_weights_couple = log_weights_couple.at[i].set(new_log_weights_couple)
 
-            return couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
+            return particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
 
         acceptance_bools = jnp.zeros((iteration, num_parallel_chain, num_mcmc_steps), dtype=bool)
 
-        couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = \
+        particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = \
             jax.lax.fori_loop(1, iteration + 1,
                               body_fn,
                               (
-                                  couple_particles,
+                                  particles,
+                                  proposed_particles,
                                   log_weights_couple,
                                   log_weights,
                                   mh_proposal_parameters,
@@ -457,6 +522,7 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                               ))
         if save_disk_mem:
             return None, None, None, mh_proposal_parameters, None, criteria, tempering_sequence, None, log_normalizations, None
+        couple_particles = jnp.stack((particles, proposed_particles), axis=1)
         return couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, acceptance_bools, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
 
     def low_memory_estimate_expectation_criteria_fun(self, state, i, j):
@@ -474,16 +540,18 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         def log_my_current_proposal(x, y):
             def _zero_proposal(x, y):
                 r"""
-                    q_1'(z, \dd z') = q_1(z, z') x \nu (dd z'), where \nu is the base measure (w.r.t to Lebesgue),
-                    where q_1' is the density (w.r.t to Lebesgue) of the first proposal, while q_1 is the
-                    density w.r.t to \nu (typically the prior)
-                    Thus at t = 0, the extended weight is \tilde{G}_0(z, z') = G_0(z) q_1(z, z') = G_0(z) q_1'(z, z')/\nu(z').
-                    Thus setting _zero_proposal(x, y) to be nu(y), and computing
-                    "log_weights_proposal - log_weights_current_proposal"
-                    is equivalent to compute log q_1'(z') - log \nu(z'), that is, log q_1(z, z'),
-                    which is the desired left term in the product for \tilde{G}_0(z, z').
+                    At t = 0, the initial proposals are drawn from q_1^{\theta_init}(x, \cdot)
+                    (see low_memory_sample), so the extended weight is
+                    \tilde{G}_0(z, z') = G_0(z) q_1^{\theta}(z, z') / q_1^{\theta_init}(z, z').
+                    state.mh_proposal_parameters[0] still holds \theta_init when this function
+                    is built at t = 0, so the builder below evaluates the density the initial
+                    proposals were actually drawn from.
                 """
-                return self.logbase_density_fn(y)
+                return self.build_mh_proposal(
+                    state,
+                    self.log_tgt_fn(state.tempering_sequence.at[0].get()),
+                    self.log_likelihood_fn,
+                    1, 1)[0](x, y)
 
             def _log_my_current_proposal(x, y):
                 r"""
@@ -537,8 +605,12 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                                log_current_tgt_density_new_proposed_particles - log_target_density_at_t_fn_particles + log_weights_proposal_inv - log_weights_proposal)
             acceptance_ratio = jnp.nan_to_num(jnp.exp(log_acceptance_ratio))
 
-            return self.fun_to_be_applied_to_the_criteria(
+            value = self.fun_to_be_applied_to_the_criteria(
                 jnp.sum(_weights * g * self.fun_to_be_applied_to_the_mh_ratio_in_the_criteria(acceptance_ratio)))
+            if self.min_ess_fraction_criteria > 0:
+                ess = 1.0 / jnp.sum(jnp.square(_weights))
+                value = jnp.where(ess >= self.min_ess_fraction_criteria * _weights.size, value, -jnp.inf)
+            return value
 
         return fun
 
@@ -568,7 +640,7 @@ class GenericAdaptiveWasteFreeTemperingSMC:
 
         """
 
-        iteration = len(tempering_sequence) - 1
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -578,20 +650,18 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         num_particles = num_parallel_chain * P
 
         subkey = jax.random.fold_in(key, 0)
-        subkeys = jax.random.split(subkey, (2 * num_parallel_chain, 2 * P))
+        key_init_particles, key_init_proposals = jax.random.split(subkey)
+        subkeys = jax.random.split(key_init_particles, (num_parallel_chain, P))
 
-        pair_init_particles = self.vmapped_base_measure_sampler(subkeys)
-        dim = pair_init_particles.shape[-1]
+        init_particles = self.vmapped_base_measure_sampler(subkeys)
+        dim = init_particles.shape[-1]
 
-        couple_particles = jnp.zeros((2, 2, num_parallel_chain, P, dim), dtype=jnp.bfloat16 if b16 else None)
-
-        init_particles = pair_init_particles.at[:num_parallel_chain, :P].get()
-        init_proposed_particles = pair_init_particles.at[num_parallel_chain:, P:].get()
-
-        couple_particles = couple_particles.at[0, 0].set(init_particles)
-        couple_particles = couple_particles.at[0, 1].set(init_proposed_particles)
+        particles = jnp.zeros((2, num_parallel_chain, P, dim), dtype=jnp.bfloat16 if b16 else None)
+        proposed_particles = jnp.zeros((2, num_parallel_chain, P, dim), dtype=jnp.bfloat16 if b16 else None)
+        particles = particles.at[0].set(init_particles)
 
         mh_proposal_parameters = jnp.zeros((iteration + 1, *initial_mh_proposal_parameter.shape))
+        mh_proposal_parameters = mh_proposal_parameters.at[0].set(initial_mh_proposal_parameter)
 
         log_normalizations = jnp.zeros((iteration + 1,))
         log_weights = jnp.zeros((2, num_parallel_chain, P), dtype=jnp.bfloat16 if b16 else None)
@@ -617,27 +687,46 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         others = jnp.zeros((iteration, *init_other.shape))
         others = others.at[0].set(init_other)
 
+        # Draw the initial proposals from q_1^{theta_init}(x, .) rather than from the base
+        # measure: the t = 0 extended weights then have the same ratio structure
+        # q^{theta} / q^{theta_init} as every later iteration, instead of the degenerate
+        # q^{theta}(x, y) / nu(y) with y ~ nu, which is supported by very few pairs.
+        init_state = SMCStatebis(
+            particles,
+            proposed_particles,
+            log_weights,
+            mh_proposal_parameters, tempering_sequence,
+            others
+        )
+        _init_log_proposal, init_proposal_sampler, _ = (
+            self.build_mh_proposal(init_state,
+                                   self.log_tgt_fn(tempering_sequence.at[0].get()),
+                                   self.log_likelihood_fn,
+                                   1, 1))
+        proposal_keys = jax.random.split(key_init_proposals, (num_parallel_chain, P))
+        init_proposed_particles = jnp.vectorize(init_proposal_sampler, signature='(2),(d)->(d)')(
+            proposal_keys, init_particles)
+        proposed_particles = proposed_particles.at[0].set(init_proposed_particles)
+
         state = SMCStatebis(
-            couple_particles.at[:, 0].get(),
-            couple_particles.at[:, 1].get(),
+            particles,
+            proposed_particles,
             log_weights,
             mh_proposal_parameters, tempering_sequence,
             others
         )
 
         to_optimize = self.low_memory_estimate_expectation_criteria_fun(state, 0, 0)
-        criteria = criteria.at[0].set(apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
-                                                       self.batch_size_criteria))
+        criteria_row = apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria,
+                                        self.batch_size_criteria)
+        criteria = criteria.at[0].set(criteria_row)
 
-        new_mh_proposal_parameter = self.optimisation(
-            to_optimize,
-            initial_mh_proposal_parameter
-        )
+        new_mh_proposal_parameter = self._tune_parameter(to_optimize, initial_mh_proposal_parameter, criteria_row)
         mh_proposal_parameters = mh_proposal_parameters.at[0].set(new_mh_proposal_parameter)
 
         new_state = SMCStatebis(
-            couple_particles.at[:, 0].get(),
-            couple_particles.at[:, 1].get(),
+            particles,
+            proposed_particles,
             log_weights,
             mh_proposal_parameters, tempering_sequence,
             others
@@ -649,19 +738,22 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                    self.log_likelihood_fn,
                                    1, 1))
         log_proposal = jnp.vectorize(_log_proposal, signature="(d),(d)->()")
+        log_init_proposal = jnp.vectorize(_init_log_proposal, signature="(d),(d)->()")
 
-        log_weights_proposal = log_proposal(init_particles, init_proposed_particles)
+        log_weights_proposal = log_proposal(init_particles, init_proposed_particles) - \
+            log_init_proposal(init_particles, init_proposed_particles)
         new_log_weights_couple = log_weights_proposal + log_weights.at[0].get()
         new_log_weights_couple, _ = normalize_log_weights(new_log_weights_couple)
         log_weights_couple = log_weights_couple.at[0].set(new_log_weights_couple)
 
-        def make_inner_loop(i: int, couple_particles: ArrayLike,
+        def make_inner_loop(i: int, particles: ArrayLike,
+                            proposed_particles: ArrayLike,
                             log_weights: ArrayLike,
                             mh_proposal_parameters: ArrayLike,
                             tempering_sequence: ArrayLike,
                             others: ArrayLike):
             log_target_density_at_t_minus_one_fn = self.log_tgt_fn(tempering_sequence.at[i - 1].get())
-            state = SMCStatebis(couple_particles.at[:, 0].get(), couple_particles.at[:, 1].get(),
+            state = SMCStatebis(particles, proposed_particles,
                                 log_weights, mh_proposal_parameters,
                                 tempering_sequence,
                                 others)
@@ -670,20 +762,21 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i, 1))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
-            def inside_body_fn(key, couple_particle):
-                # Resampling for the first iteration.
+            def inside_body_fn(key, particle):
                 subkey_0 = jax.random.fold_in(key, 0)
-                first_proposal = proposal_sampler(subkey_0, couple_particle.at[0].get())
-                couple_particle = couple_particle.at[1].set(first_proposal)
+                first_proposal = proposal_sampler(subkey_0, particle)
+                couple_particle = jnp.stack((particle, first_proposal))
 
                 _couple_particles = jnp.zeros((P, 2, dim), dtype=jnp.bfloat16 if b16 else None)
                 _couple_particles = _couple_particles.at[0].set(couple_particle)
                 _acceptance_bools = jnp.zeros((num_mcmc_steps,), dtype=bool)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, couple_particles_across_p, acceptance_bool_across_p = carry
+                    key, couple_particles_across_p, acceptance_bool_across_p, log_density_particle = carry
                     couple_particle = couple_particles_across_p.at[p - 1].get()
 
                     particle = couple_particle.at[0].get()
@@ -692,32 +785,40 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                     subkey_p = jax.random.fold_in(key, p)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     acceptance_bool_across_p = acceptance_bool_across_p.at[p - 1].set(accept_MH_boolean)
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     new_proposed_particle = proposal_sampler(subkey_p, new_particle)
                     couple_particles_across_p = couple_particles_across_p.at[p, 0].set(new_particle)
                     couple_particles_across_p = couple_particles_across_p.at[p, 1].set(new_proposed_particle)
-                    return key, couple_particles_across_p, acceptance_bool_across_p
+                    return key, couple_particles_across_p, acceptance_bool_across_p, log_density_particle
 
-                _, _couple_particles, _acceptance_bools = jax.lax.fori_loop(
+                _, _couple_particles, _acceptance_bools, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _couple_particles,
-                        _acceptance_bools
+                        _acceptance_bools,
+                        init_log_density
                     )
                 )
                 return _couple_particles, _acceptance_bools
@@ -725,14 +826,13 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             return inside_body_fn
 
         def body_fn(i, carry):
-            couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = carry
+            particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = carry
             subkey = jax.random.fold_in(key, i)
+            key_resample, key_chains = jax.random.split(subkey)
 
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
-            resampled_couple_particles = couple_particles.at[0].get().reshape((num_particles, 2, dim)).at[
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
+            resampled_particles = particles.at[0].get().reshape((num_particles, dim)).at[
                 ancestors].get()
-            particles = couple_particles.at[:, 0].get()
-            proposed_particles = couple_particles.at[:, 1].get()
             if target_ess:
                 _log_weights = self.vmapped_log_likelihood_fn(
                     particles.at[i - 1].get())  # do not use new_particles, this is wrong
@@ -743,7 +843,8 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                 tempering_sequence = tempering_sequence.at[i].set(tempering_sequence.at[i - 1].get() + dlmbda)
                 diff_tempering_sequence = diff_tempering_sequence.at[i].set(dlmbda)
 
-            inside_body_fn = make_inner_loop(i, couple_particles,
+            inside_body_fn = make_inner_loop(i, particles,
+                                             proposed_particles,
                                              log_weights,
                                              mh_proposal_parameters,
                                              tempering_sequence,
@@ -763,13 +864,13 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                                  i, 1)
             others = others.at[i].set(other)
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
-            new_couple_particles, new_acceptance_bools = inside_body_fn(keys, resampled_couple_particles)
+            new_couple_particles, new_acceptance_bools = inside_body_fn(keys, resampled_particles)
             new_particles = new_couple_particles.at[..., 0, :].get()
             new_proposed_particles = new_couple_particles.at[..., 1, :].get()
-            couple_particles = couple_particles.at[1, 0].set(new_particles)
-            couple_particles = couple_particles.at[1, 1].set(new_proposed_particles)
+            particles = particles.at[1].set(new_particles)
+            proposed_particles = proposed_particles.at[1].set(new_proposed_particles)
             log_Gi_fn = self.vmapped_log_weights_fn(diff_tempering_sequence.at[i].get())
             new_log_weights = log_Gi_fn(new_particles)
             new_log_weights, log_normalization = normalize_log_weights(new_log_weights)
@@ -777,21 +878,17 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             log_weights = log_weights.at[1].set(new_log_weights)
 
             new_state = SMCStatebis(
-                couple_particles.at[:, 0].get(),
-                couple_particles.at[:, 1].get(),
+                particles,
+                proposed_particles,
                 log_weights,
                 mh_proposal_parameters, tempering_sequence, others
             )
 
             to_optimize = self.low_memory_estimate_expectation_criteria_fun(new_state, i, 1)
-            new_mh_proposal_parameter = self.optimisation(
-                to_optimize,
-                mh_proposal_parameters.at[i - 1].get()
-            )
-            jax.clear_caches()
-            criteria = criteria.at[i].set(
-                apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria, self.batch_size_criteria))
-            jax.clear_caches()
+            criteria_row = apply_vmap_batch(jax.vmap(to_optimize), self.grid_criteria, self.batch_size_criteria)
+            criteria = criteria.at[i].set(criteria_row)
+            new_mh_proposal_parameter = self._tune_parameter(to_optimize, mh_proposal_parameters.at[i - 1].get(),
+                                                             criteria_row)
             mh_proposal_parameters = mh_proposal_parameters.at[i].set(new_mh_proposal_parameter)
 
             new_state = SMCStatebis(
@@ -827,15 +924,17 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             # Need to pass the new weights and particles (j=1) to (j-1=0) for next iteration
             log_weights = log_weights.at[0].set(log_weights.at[1].get())
             log_weights_couple = log_weights_couple.at[0].set(log_weights_couple.at[1].get())
-            couple_particles = couple_particles.at[0].set(couple_particles.at[1].get())
+            particles = particles.at[0].set(particles.at[1].get())
+            proposed_particles = proposed_particles.at[0].set(proposed_particles.at[1].get())
 
-            return couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
+            return particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
 
-        couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = \
+        particles, proposed_particles, log_weights_couple, log_weights, mh_proposal_parameters, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others = \
             jax.lax.fori_loop(1, iteration + 1,
                               body_fn,
                               (
-                                  couple_particles,
+                                  particles,
+                                  proposed_particles,
                                   log_weights_couple,
                                   log_weights,
                                   mh_proposal_parameters,
@@ -845,6 +944,7 @@ class GenericAdaptiveWasteFreeTemperingSMC:
                                   log_normalizations,
                                   others
                               ))
+        couple_particles = jnp.stack((particles, proposed_particles), axis=1)
         return couple_particles, log_weights_couple, log_weights, mh_proposal_parameters, None, criteria, tempering_sequence, diff_tempering_sequence, log_normalizations, others
 
 
@@ -890,7 +990,23 @@ class GenericWasteFreeTemperingSMC:
                tempering_sequence: ArrayLike,
                target_ess: Optional[float] = None) -> Tuple[
         ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]:
-        iteration = len(tempering_sequence) - 1
+        r"""
+
+        Parameters
+        ----------
+        self
+        key
+        num_parallel_chain
+        num_mcmc_steps
+        tempering_sequence
+        target_ess
+        init_other
+
+        Returns
+        -------
+
+        """
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -938,14 +1054,16 @@ class GenericWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((P, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[p - 1].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -953,28 +1071,36 @@ class GenericWasteFreeTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[p].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -984,7 +1110,8 @@ class GenericWasteFreeTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
+            key_resample, key_chains = jax.random.split(subkey)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[i - 1].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1003,7 +1130,7 @@ class GenericWasteFreeTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[i].set(new_particles)
@@ -1031,8 +1158,23 @@ class GenericWasteFreeTemperingSMC:
                           tempering_sequence: ArrayLike,
                           target_ess: Optional[float] = None) -> Tuple[
         ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]:
+        r"""
 
-        iteration = len(tempering_sequence) - 1
+        Parameters
+        ----------
+        self
+        key
+        num_parallel_chain
+        num_mcmc_steps
+        tempering_sequence
+        target_ess
+        init_other
+
+        Returns
+        -------
+
+        """
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -1080,14 +1222,16 @@ class GenericWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((P, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[p - 1].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -1095,28 +1239,36 @@ class GenericWasteFreeTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[p].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -1126,7 +1278,8 @@ class GenericWasteFreeTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
+            key_resample, key_chains = jax.random.split(subkey)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[0].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1145,7 +1298,7 @@ class GenericWasteFreeTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[0].set(new_particles)
@@ -1172,7 +1325,7 @@ class GenericWasteFreeTemperingSMC:
 
 class GenericTemperingSMC:
     """
-        This is a plain SMC implementation.
+        Same as previously, but the kernels are fixed. This is a plain SMC implementation.
     """
 
     def __init__(self, logbase_density_fn: LogDensity,
@@ -1228,7 +1381,7 @@ class GenericTemperingSMC:
         -------
 
         """
-        iteration = len(tempering_sequence) - 1
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -1276,14 +1429,16 @@ class GenericTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((1, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[0].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -1291,28 +1446,36 @@ class GenericTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[0].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -1322,7 +1485,8 @@ class GenericTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
+            key_resample, key_chains = jax.random.split(subkey)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[i - 1].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1341,7 +1505,7 @@ class GenericTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[i].set(new_particles)
@@ -1369,8 +1533,23 @@ class GenericTemperingSMC:
                           tempering_sequence: ArrayLike,
                           target_ess: Optional[float] = None) -> Tuple[
         ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]:
+        r"""
 
-        iteration = len(tempering_sequence) - 1
+        Parameters
+        ----------
+        self
+        key
+        num_parallel_chain
+        num_mcmc_steps
+        tempering_sequence
+        target_ess
+        init_other
+
+        Returns
+        -------
+
+        """
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -1418,14 +1597,16 @@ class GenericTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((1, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[0].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -1433,28 +1614,36 @@ class GenericTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[0].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     P,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -1464,7 +1653,8 @@ class GenericTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
+            key_resample, key_chains = jax.random.split(subkey)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[0].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1483,7 +1673,7 @@ class GenericTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[0].set(new_particles)
@@ -1551,8 +1741,23 @@ class GenericGreedyWasteFreeTemperingSMC:
                tempering_sequence: ArrayLike,
                target_ess: Optional[float] = None) -> Tuple[
         ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]:
+        r"""
 
-        iteration = len(tempering_sequence) - 1
+        Parameters
+        ----------
+        self
+        key
+        num_parallel_chain
+        tempering_sequence
+        num_mcmc_steps_schedule
+        target_ess
+        init_other
+
+        Returns
+        -------
+
+        """
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -1579,10 +1784,8 @@ class GenericGreedyWasteFreeTemperingSMC:
             _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
             eps = 1e-2
-            dlmbda = dichotomy(
-                lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(
-                    target_ess), 0. + eps, 1.0, eps,
-                10)
+            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(target_ess), 0. + eps, 1.0, eps,
+                               10)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1593,8 +1796,7 @@ class GenericGreedyWasteFreeTemperingSMC:
         mask = p_idx <= num_mcmc_steps_schedule[0]
         init_log_weights = jnp.where(mask[None, :], init_log_weights, -jnp.inf)
 
-        init_log_weights, log_normalization = normalize_log_weights(init_log_weights,
-                                                                    num_mcmc_steps_schedule[0] * num_parallel_chain)
+        init_log_weights, log_normalization = normalize_log_weights(init_log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain)
 
         log_normalizations = log_normalizations.at[0].set(log_normalization)
         log_weights = log_weights.at[0].set(init_log_weights)
@@ -1612,14 +1814,16 @@ class GenericGreedyWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((P, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[p - 1].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -1627,28 +1831,36 @@ class GenericGreedyWasteFreeTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[p].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     num_mcmc_steps_schedule.at[i].get() + 1,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -1658,11 +1870,12 @@ class GenericGreedyWasteFreeTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
+            key_resample, key_chains = jax.random.split(subkey)
 
             mask = p_idx <= num_mcmc_steps_schedule[i - 1]
             log_weights = log_weights.at[i - 1].set(jnp.where(mask[None, :], log_weights.at[i - 1].get(), -jnp.inf))
 
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[i - 1].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[i - 1].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1672,8 +1885,7 @@ class GenericGreedyWasteFreeTemperingSMC:
                 _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
                 eps = 1e-2
-                dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[
-                    i - 1] * num_parallel_chain) - jnp.log(target_ess), 0. + eps,
+                dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[i - 1] * num_parallel_chain) - jnp.log(target_ess), 0. + eps,
                                    1.0 - tempering_sequence.at[i - 1].get(), eps, 10)
                 dlmbda = jnp.clip(dlmbda, 0., 1.0 - tempering_sequence.at[i - 1].get())
                 tempering_sequence = tempering_sequence.at[i].set(tempering_sequence.at[i - 1].get() + dlmbda)
@@ -1685,7 +1897,7 @@ class GenericGreedyWasteFreeTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[i].set(new_particles)
@@ -1695,8 +1907,7 @@ class GenericGreedyWasteFreeTemperingSMC:
             mask = p_idx <= num_mcmc_steps_schedule[i]
             new_log_weights = jnp.where(mask[None, :], new_log_weights, -jnp.inf)
 
-            new_log_weights, log_normalization = normalize_log_weights(new_log_weights,
-                                                                       num_mcmc_steps_schedule[i] * num_parallel_chain)
+            new_log_weights, log_normalization = normalize_log_weights(new_log_weights, num_mcmc_steps_schedule[i] * num_parallel_chain)
             log_normalizations = log_normalizations.at[i].set(log_normalization)
             log_weights = log_weights.at[i].set(new_log_weights)
 
@@ -1719,8 +1930,23 @@ class GenericGreedyWasteFreeTemperingSMC:
                           tempering_sequence: ArrayLike,
                           target_ess: Optional[float] = None) -> Tuple[
         ArrayLike, ArrayLike, ArrayLike, ArrayLike, ArrayLike]:
+        r"""
 
-        iteration = len(tempering_sequence) - 1
+        Parameters
+        ----------
+        self
+        key
+        num_parallel_chain
+        num_mcmc_steps
+        tempering_sequence
+        target_ess
+        init_other
+
+        Returns
+        -------
+
+        """
+        iteration = len(tempering_sequence)
         diff_tempering_sequence = jnp.diff(tempering_sequence)
         diff_tempering_sequence = jnp.insert(diff_tempering_sequence, 0, tempering_sequence.at[0].get())
 
@@ -1747,10 +1973,8 @@ class GenericGreedyWasteFreeTemperingSMC:
             _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
             eps = 1e-2
-            dlmbda = dichotomy(
-                lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(
-                    target_ess), 0. + eps, 1.0, eps,
-                10)
+            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(target_ess), 0. + eps, 1.0, eps,
+                               10)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1761,8 +1985,8 @@ class GenericGreedyWasteFreeTemperingSMC:
         mask = p_idx <= num_mcmc_steps_schedule[0]
         init_log_weights = jnp.where(mask[None, :], init_log_weights, -jnp.inf)
 
-        init_log_weights, log_normalization = normalize_log_weights(init_log_weights,
-                                                                    num_mcmc_steps_schedule[0] * num_parallel_chain)
+        init_log_weights, log_normalization = normalize_log_weights(init_log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain)
+
 
         log_normalizations = log_normalizations.at[0].set(log_normalization)
         log_weights = log_weights.at[0].set(init_log_weights)
@@ -1780,14 +2004,16 @@ class GenericGreedyWasteFreeTemperingSMC:
                                        self.log_tgt_fn(tempering_sequence.at[i - 1].get()),
                                        self.log_likelihood_fn,
                                        i))
+            is_symmetric = getattr(log_proposal, "is_symmetric", False)
 
             @jax.vmap
             def inside_body_fn(key, particle):
                 _particles = jnp.zeros((P, dim))
                 _particles = _particles.at[0].set(particle)
+                init_log_density = log_target_density_at_t_minus_one_fn(particle)
 
                 def insinde_inside_body_fn(p, carry):
-                    key, particles_across_p = carry
+                    key, particles_across_p, log_density_particle = carry
                     particle = particles_across_p.at[p - 1].get()
 
                     subkey_p = jax.random.fold_in(key, p)
@@ -1795,28 +2021,36 @@ class GenericGreedyWasteFreeTemperingSMC:
                     proposed_particle = proposal_sampler(subkey_p, particle)
                     _, key = jax.random.split(key)
 
-                    log_target_density_at_t_minus_one_fn_particle = log_target_density_at_t_minus_one_fn(particle)
-                    log_current_tgt_density_new_proposed_particle = log_target_density_at_t_minus_one_fn(
-                        proposed_particle)
+                    # The target density at the current particle is carried over from the
+                    # previous step; only the proposed particle requires a fresh evaluation.
+                    log_density_proposed = log_target_density_at_t_minus_one_fn(proposed_particle)
+                    if is_symmetric:
+                        log_proposal_for_current = log_proposal_for_proposed = 0.
+                    else:
+                        log_proposal_for_current = log_proposal(proposed_particle, particle)
+                        log_proposal_for_proposed = log_proposal(particle, proposed_particle)
 
                     accept_MH_boolean, _ = accept_reject_mh_step(
                         key,
-                        log_current_tgt_density_new_proposed_particle,
-                        log_target_density_at_t_minus_one_fn_particle,
-                        log_proposal(proposed_particle, particle),
-                        log_proposal(particle, proposed_particle)
+                        log_density_proposed,
+                        log_density_particle,
+                        log_proposal_for_current,
+                        log_proposal_for_proposed
                     )
                     new_particle = jax.lax.select(accept_MH_boolean, proposed_particle, particle)
+                    log_density_particle = jax.lax.select(accept_MH_boolean, log_density_proposed,
+                                                          log_density_particle)
                     particles_across_p = particles_across_p.at[p].set(new_particle)
-                    return key, particles_across_p
+                    return key, particles_across_p, log_density_particle
 
-                _, _particles = jax.lax.fori_loop(
+                _, _particles, _ = jax.lax.fori_loop(
                     1,
                     num_mcmc_steps_schedule.at[i].get() + 1,
                     insinde_inside_body_fn,
                     (
                         key,
                         _particles,
+                        init_log_density,
                     )
                 )
                 return _particles
@@ -1826,11 +2060,12 @@ class GenericGreedyWasteFreeTemperingSMC:
         def body_fn(i, carry):
             particles, log_weights, tempering_sequence, diff_tempering_sequence, log_normalizations = carry
             subkey = jax.random.fold_in(key, i)
+            key_resample, key_chains = jax.random.split(subkey)
 
             mask = p_idx <= num_mcmc_steps_schedule[i - 1]
             log_weights = log_weights.at[0].set(jnp.where(mask[None, :], log_weights.at[0].get(), -jnp.inf))
 
-            ancestors = multinomial(subkey, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
+            ancestors = multinomial(key_resample, jnp.exp(log_weights.at[0].get().reshape(-1)), num_parallel_chain)
             resampled_particles = particles.at[0].get().reshape((num_particles, dim)).at[
                 ancestors].get()
             if target_ess:
@@ -1840,9 +2075,7 @@ class GenericGreedyWasteFreeTemperingSMC:
                 _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
                 eps = 1e-2
-                dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights,
-                                                          num_mcmc_steps_schedule[i] * num_parallel_chain) - jnp.log(
-                    target_ess), 0. + eps,
+                dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[i-1] * num_parallel_chain) - jnp.log(target_ess), 0. + eps,
                                    1.0 - tempering_sequence.at[i - 1].get(), eps, 10)
                 dlmbda = jnp.clip(dlmbda, 0., 1.0 - tempering_sequence.at[i - 1].get())
                 tempering_sequence = tempering_sequence.at[i].set(tempering_sequence.at[i - 1].get() + dlmbda)
@@ -1854,7 +2087,7 @@ class GenericGreedyWasteFreeTemperingSMC:
                                              tempering_sequence,
                                              )
 
-            keys = jax.random.split(subkey, num_parallel_chain)
+            keys = jax.random.split(key_chains, num_parallel_chain)
             # Running the inner loop for iteration t
             new_particles = inside_body_fn(keys, resampled_particles)
             particles = particles.at[0].set(new_particles)
@@ -1864,8 +2097,7 @@ class GenericGreedyWasteFreeTemperingSMC:
             mask = p_idx <= num_mcmc_steps_schedule[i]
             new_log_weights = jnp.where(mask[None, :], new_log_weights, -jnp.inf)
 
-            new_log_weights, log_normalization = normalize_log_weights(new_log_weights,
-                                                                       num_mcmc_steps_schedule[0] * num_parallel_chain)
+            new_log_weights, log_normalization = normalize_log_weights(new_log_weights, num_mcmc_steps_schedule[i] * num_parallel_chain)
             log_normalizations = log_normalizations.at[i].set(log_normalization)
             log_weights = log_weights.at[0].set(new_log_weights)
 

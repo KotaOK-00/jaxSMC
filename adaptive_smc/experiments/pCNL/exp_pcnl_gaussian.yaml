@@ -1,0 +1,23 @@
+config:
+  run: Yes
+  num_parallel_chain: 32
+  num_mcmc_steps: 200
+  sequential_repetitions: 1
+  parallel_repetitions: 4
+  target_ess: null          # null: fixed linspace tempering of length tempering_length
+  dim: 5
+  tempering_length: 15
+  OUTPUT_PATH: "./output/"
+  prefix: "pcnl"
+  compress_output: No
+  min_ess_fraction_criteria: 0.05
+  batch_size_criteria: 100
+  grid:                     # 2d (rho, tau) grid on which the ESJD criteria is computed
+    n_rho: 40
+    rho_min: 0.0
+    rho_max: 0.99
+    n_tau: 40
+    tau_min: 0.05
+    tau_max: 1.5
+  problem:
+    tau_target: 0.5

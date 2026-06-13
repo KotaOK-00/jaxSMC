@@ -14,17 +14,29 @@ __all__ = [
     "build_build_gaussian_rw_proposal"
 ]
 
+__experimental__ = []
+
 
 def build_gaussian_rw_proposal(C: ArrayLike):
     """
-    Gaussian RW with fixed covariance matrix C
+    Gaussian RW with fixed covariance matrix C.
+    C is factorised once here, so that neither the sampler nor the log density
+    refactorises it at every MH step.
     """
+    C = jnp.atleast_2d(C)
+    chol = jnp.linalg.cholesky(C)
+    dim = chol.shape[-1]
+    log_norm_const = -0.5 * dim * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diagonal(chol)))
 
     def gaussian_rwmh_cov_log_proposal(x, y):
-        return jax.scipy.stats.multivariate_normal.logpdf(y, x, C)
+        z = jax.scipy.linalg.solve_triangular(chol, y - x, lower=True)
+        return log_norm_const - 0.5 * jnp.sum(jnp.square(z))
+
+    # q(x, y) = q(y, x): the proposal terms cancel in the MH ratio.
+    gaussian_rwmh_cov_log_proposal.is_symmetric = True
 
     def gaussian_rwmh_sampler(key, x):
-        return jax.random.multivariate_normal(key, x, C)
+        return x + chol @ jax.random.normal(key, (dim,))
 
     return gaussian_rwmh_cov_log_proposal, gaussian_rwmh_sampler, jnp.empty(1)
 

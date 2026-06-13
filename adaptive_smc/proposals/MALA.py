@@ -1,5 +1,5 @@
 from typing import Optional, Tuple
-from adaptive_smc.smc_types import LogProposal, ProposalSampler
+from adaptive_smc.smc_types import LogDensity, LogDensity, LogProposal, ProposalSampler
 
 import jax
 import jax.numpy as jnp
@@ -21,15 +21,24 @@ def MALA_proposal(Sigma, log_tgt_density_fn: LogDensity) -> Tuple[LogProposal, P
     \Sigma
 
     y = x + 0.5 \Sigma @ grad \log \pi (x) + C^{1/2} zeta, zeta\sim \mathcal{N}(0, I).
+    \Sigma is factorised once here, so that neither the sampler nor the log density
+    refactorises it at every MH step.
     """
+    Sigma = jnp.atleast_2d(Sigma)
+    chol = jnp.linalg.cholesky(Sigma)
+    dim = chol.shape[-1]
+    log_norm_const = -0.5 * dim * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diagonal(chol)))
+    grad_log_tgt_fn = jax.jacfwd(log_tgt_density_fn)
+
+    def drift(x):
+        return x + 0.5 * Sigma @ grad_log_tgt_fn(x)
 
     def gaussian_mala_log_proposal(x, y):
-        return jax.scipy.stats.multivariate_normal.logpdf(y, x + 0.5 * Sigma @ jax.jacfwd(
-            log_tgt_density_fn)(x), Sigma)
+        z = jax.scipy.linalg.solve_triangular(chol, y - drift(x), lower=True)
+        return log_norm_const - 0.5 * jnp.sum(jnp.square(z))
 
     def gaussian_mala_sampler(key, x):
-        return jax.random.multivariate_normal(key, x + 0.5 * Sigma @ jax.jacfwd(
-            log_tgt_density_fn)(x), Sigma)
+        return drift(x) + chol @ jax.random.normal(key, (dim,))
 
     return gaussian_mala_log_proposal, gaussian_mala_sampler, jnp.empty(1)
 
@@ -53,7 +62,7 @@ def build_MALA_proposal_gamma_cov(state: SMCStatebis, log_tgt_density_fn: LogDen
         particles_at_j_minus_one = particles.at[j - 1].get().reshape(-1, particles.shape[-1])
         log_weights_at_j_minus_one = log_weights.at[j - 1].get().reshape(-1, )
         weights_at_j_minus_one = jnp.exp(log_weights_at_j_minus_one)
-        cov_hat = cov_estimate(particles_at_j_minus_one, weights_at_j_minus_one)
+        cov_hat, _ = cov_estimate(particles_at_j_minus_one, weights_at_j_minus_one)
         return cov_hat
 
     cov_hat = fun_to_be_called_if_j_greater_than_one()

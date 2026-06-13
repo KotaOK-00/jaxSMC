@@ -67,9 +67,10 @@ def build_build_mixture_ar_rwm(mu, C) -> ProposalBuilder:
             """
             Toss a coin with probability \beta
             """
-            toss = jax.random.bernoulli(key, beta)
+            key_toss, key_sample = jax.random.split(key)
+            toss = jax.random.bernoulli(key_toss, beta)
             sample = jax.lax.cond(toss, lambda _: gaussian_rwmh_sampler(*_), lambda _: gaussian_ar_sampler(*_),
-                                  (key, x))
+                                  (key_sample, x))
             return sample
 
         return mixture_ar_rwm_log_proposal, mixture_ar_rwm_sampler, jnp.empty(1)
