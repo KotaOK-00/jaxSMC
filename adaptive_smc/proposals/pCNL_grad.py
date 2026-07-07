@@ -5,12 +5,12 @@ from jax.typing import ArrayLike
 from adaptive_smc.smc_types import LogDensity
 from adaptive_smc.smc_types import SMCStatebis
 
-__all__ = ["build_build_pCNL_proposal",
-           "build_build_ARLW",
+__all__ = ["build_build_pCNL_proposal_grad",
+           "build_build_ARLW_grad",
            ]
 
 
-def build_build_pCNL_proposal(mu: ArrayLike, C: ArrayLike):
+def build_build_pCNL_proposal_grad(mu: ArrayLike, C: ArrayLike):
     r"""
     pCNL proposal for the tempered target \pi_{i-1} = \nu e^{\lambda_{i-1} \ell} with
     reference \nu = N(\mu, C). The Crank-Nicolson part handles \nu exactly through \rho,
@@ -39,7 +39,7 @@ def build_build_pCNL_proposal(mu: ArrayLike, C: ArrayLike):
     return _build
 
 
-def build_build_ARLW(mu: ArrayLike, C: ArrayLike):
+def build_build_ARLW_grad(mu: ArrayLike, C: ArrayLike):
     r"""
     Uncoupled version of pCNL (a mix between AR/pCN and Langevin), with parameters
     (\rho, \tau) read from state.mh_proposal_parameters[i - 1]:
