@@ -4,3 +4,5 @@ from adaptive_smc.proposals.pMALA import *
 from adaptive_smc.proposals.rw import *
 from adaptive_smc.proposals.mixture import *
 from adaptive_smc.proposals.pCNL import *
+from adaptive_smc.proposals.pCNL_grad import *
+from adaptive_smc.proposals.MALA_grad import *
