@@ -10,12 +10,12 @@ from adaptive_smc.estimates import cov_estimate
 from adaptive_smc.smc_types import LogDensity, SMCStatebis
 
 __all__ = [
-    "build_MALA_proposal_gamma_cov",
-    "build_build_MALA_proposal_gamma"
+    "build_MALA_proposal_gamma_cov_grad",
+    "build_build_MALA_proposal_gamma_grad"
 ]
 
 
-def MALA_proposal(Sigma, log_tgt_density_fn: LogDensity) -> Tuple[LogProposal, ProposalSampler, ArrayLike]:
+def MALA_proposal_grad(Sigma, log_tgt_density_fn: LogDensity) -> Tuple[LogProposal, ProposalSampler, ArrayLike]:
     r"""
     MALA proposal and sampler for a certain conditioning matrix
     \Sigma
@@ -43,7 +43,7 @@ def MALA_proposal(Sigma, log_tgt_density_fn: LogDensity) -> Tuple[LogProposal, P
     return gaussian_mala_log_proposal, gaussian_mala_sampler, jnp.empty(1)
 
 
-def build_MALA_proposal_gamma_cov(state: SMCStatebis, log_tgt_density_fn: LogDensity, _: LogDensity, i: int,
+def build_MALA_proposal_gamma_cov_grad(state: SMCStatebis, log_tgt_density_fn: LogDensity, _: LogDensity, i: int,
                                   j: Optional[int] = None):
     """
     Langevin proposal with a gamma parameter and adaptive covariance matrix
@@ -70,7 +70,7 @@ def build_MALA_proposal_gamma_cov(state: SMCStatebis, log_tgt_density_fn: LogDen
     return MALA_proposal(scaled_cov_hat, log_tgt_density_fn)
 
 
-def build_build_MALA_proposal_gamma(C):
+def build_build_MALA_proposal_gamma_grad(C):
     """
     Fixed covariance matrix (up to the scaling parameter)
     """
@@ -82,6 +82,6 @@ def build_build_MALA_proposal_gamma(C):
         dim = particles.shape[-1]
         optimal_scale = gamma ** 2 / dim ** (1 / 3)
         _C = optimal_scale * C
-        return MALA_proposal(_C, log_tgt_density_fn)
+        return MALA_proposal_grad(_C, log_tgt_density_fn)
 
     return build_MALA_proposal
