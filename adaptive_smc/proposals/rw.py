@@ -11,7 +11,10 @@ __all__ = [
     "build_gaussian_rw_proposal",
     "build_gaussian_rwmh_cov_proposal",
     "build_gaussian_rwmh_cov_proposal_gamma",
-    "build_build_gaussian_rw_proposal"
+    "build_build_gaussian_rw_proposal",
+    "build_gaussian_rw_diag_proposal", # new
+    "build_gaussian_rwmh_diag_cov_proposal_gamma", # new
+    "build_gaussian_rwmh_regular_cov_proposal_gamma", # new
 ]
 
 __experimental__ = []
@@ -98,3 +101,92 @@ def build_build_gaussian_rw_proposal(C: ArrayLike) -> ProposalBuilder:
         return build_gaussian_rw_proposal(_C)
 
     return build_gaussian_rw_proposal_gamma
+
+
+def build_gaussian_rw_diag_proposal(variances: ArrayLike):
+    """
+    Gaussian RW with fixed *diagonal* covariance diag(variances).
+    O(dim) per evaluation: no Cholesky factorisation, no triangular solve.
+    """
+    variances = jnp.atleast_1d(variances)
+    scale = jnp.sqrt(variances)
+    dim = scale.shape[-1]
+    log_norm_const = -0.5 * dim * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(scale))
+
+    def gaussian_rw_diag_log_proposal(x, y):
+        z = (y - x) / scale
+        return log_norm_const - 0.5 * jnp.sum(jnp.square(z))
+
+    # q(x, y) = q(y, x): the proposal terms cancel in the MH ratio.
+    gaussian_rw_diag_log_proposal.is_symmetric = True
+
+    def gaussian_rw_diag_sampler(key, x):
+        return x + scale * jax.random.normal(key, (dim,))
+
+    return gaussian_rw_diag_log_proposal, gaussian_rw_diag_sampler, jnp.empty(1)
+
+
+def build_gaussian_rwmh_diag_cov_proposal_gamma(state: SMCStatebis, _: LogDensity, __: LogDensity, i: int,
+                                                j: Optional[int] = None):
+    r"""
+    Same as build_gaussian_rwmh_cov_proposal_gamma but keeping only the diagonal of the
+    covariance estimate, i.e. C = gamma**2/dim * diag(diag(\hat\Sigma))
+    """
+    gamma = state.mh_proposal_parameters.at[i - 1].get()
+    particles = state.particles
+    dim = particles.shape[-1]
+    log_weights = state.log_weights
+    optimal_scale = gamma ** 2 / dim
+
+    j = j or i
+
+    def fun_to_be_called_if_j_greater_than_one():
+        r"""
+        Compute the covariance estimate of \pi_{t-1} given t\geq 1
+        """
+        particles_at_j_minus_one = particles.at[j - 1].get().reshape(-1, particles.shape[-1])
+        log_weights_at_j_minus_one = log_weights.at[j - 1].get().reshape(-1, )
+        weights_at_j_minus_one = jnp.exp(log_weights_at_j_minus_one)
+        cov_hat, _ = cov_estimate(particles_at_j_minus_one, weights_at_j_minus_one)
+        return cov_hat
+
+    variances = optimal_scale * jnp.diagonal(fun_to_be_called_if_j_greater_than_one())
+
+    gaussian_rw_diag_log_proposal, gaussian_rw_diag_sampler, _ = build_gaussian_rw_diag_proposal(variances)
+
+    return gaussian_rw_diag_log_proposal, gaussian_rw_diag_sampler, jnp.empty(1)
+
+
+def build_gaussian_rwmh_regular_cov_proposal_gamma(state: SMCStatebis, _: LogDensity, __: LogDensity, i: int,
+                                                   j: Optional[int] = None):
+    r"""
+    Regularised adaptive RWMH: C = gamma**2/dim * I + \hat\Sigma, with
+    gamma = mh_proposal_parameters[i - 1]. The gamma**2/dim * I term keeps C
+    positive definite even when \hat\Sigma is singular (weight degeneracy,
+    duplicated particles after resampling, N < dim, ...). Note that only the
+    identity component is tuned: C >= \hat\Sigma in the Loewner order, so the
+    proposal never shrinks below the spread of \pi_{t-1}.
+    """
+    gamma = state.mh_proposal_parameters.at[i - 1].get()
+    particles = state.particles
+    dim = particles.shape[-1]
+    log_weights = state.log_weights
+    optimal_scale = gamma ** 2 / dim
+
+    j = j or i
+
+    def fun_to_be_called_if_j_greater_than_one():
+        r"""
+        Compute the covariance estimate of \pi_{t-1} given t\geq 1
+        """
+        particles_at_j_minus_one = particles.at[j - 1].get().reshape(-1, particles.shape[-1])
+        log_weights_at_j_minus_one = log_weights.at[j - 1].get().reshape(-1, )
+        weights_at_j_minus_one = jnp.exp(log_weights_at_j_minus_one)
+        cov_hat, _ = cov_estimate(particles_at_j_minus_one, weights_at_j_minus_one)
+        return cov_hat
+
+    C = optimal_scale * jnp.eye(dim) + fun_to_be_called_if_j_greater_than_one()
+
+    gaussian_rwmh_cov_log_proposal, gaussian_rwmh_sampler, _ = build_gaussian_rw_proposal(C)
+
+    return gaussian_rwmh_cov_log_proposal, gaussian_rwmh_sampler, jnp.empty(1)
