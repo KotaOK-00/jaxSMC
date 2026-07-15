@@ -14,7 +14,7 @@ __all__ = [
     "build_build_gaussian_rw_proposal",
     "build_gaussian_rw_diag_proposal", # new
     "build_gaussian_rwmh_diag_cov_proposal_gamma", # new
-    "build_gaussian_rwmh_regular_cov_proposal", # new
+    "build_gaussian_rwmh_regular_cov_proposal_gamma", # new
 ]
 
 __experimental__ = []
@@ -157,7 +157,7 @@ def build_gaussian_rwmh_diag_cov_proposal_gamma(state: SMCStatebis, _: LogDensit
     return gaussian_rw_diag_log_proposal, gaussian_rw_diag_sampler, jnp.empty(1)
 
 
-def build_gaussian_rwmh_regular_cov_proposal(state: SMCStatebis, _: LogDensity, __: LogDensity, i: int,
+def build_gaussian_rwmh_regular_cov_proposal_gamma(state: SMCStatebis, _: LogDensity, __: LogDensity, i: int,
                                                    j: Optional[int] = None):
     r"""
     Regularised adaptive RWMH: C = gamma**2/dim * I + \hat\Sigma, with
