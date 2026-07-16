@@ -185,7 +185,7 @@ def build_gaussian_rwmh_regular_cov_proposal_gamma(state: SMCStatebis, _: LogDen
         cov_hat, _ = cov_estimate(particles_at_j_minus_one, weights_at_j_minus_one)
         return cov_hat
 
-    C = optimal_scale * jnp.eye(dim) + fun_to_be_called_if_j_greater_than_one()
+    C = optimal_scale * jnp.eye(dim) + 2.38 ** 2 / dim * fun_to_be_called_if_j_greater_than_one()
 
     gaussian_rwmh_cov_log_proposal, gaussian_rwmh_sampler, _ = build_gaussian_rw_proposal(C)
 
