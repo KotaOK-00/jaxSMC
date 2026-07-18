@@ -221,7 +221,7 @@ def build_gaussian_rwmh_regular_prec_proposal_gamma(state: SMCStatebis, _: LogDe
         return cov_hat
 
     cov_hat = fun_to_be_called_if_j_greater_than_one()
-    C = jnp.linalg.solve(jnp.eye(dim) + gamma * cov_hat, cov_hat)
+    C = 2.38 ** 2 / dim * jnp.linalg.solve(jnp.eye(dim) + gamma * cov_hat, cov_hat)
     C = 0.5 * (C + C.T)
 
     gaussian_rwmh_cov_log_proposal, gaussian_rwmh_sampler, _ = build_gaussian_rw_proposal(C)
