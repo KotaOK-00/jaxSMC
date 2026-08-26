@@ -99,3 +99,40 @@ def build_build_barker_proposal_gamma(C):
         return barker_proposal(_C, log_tgt_density_fn)
 
     return build_barker_proposal
+
+
+def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike,
+                            sigma: Optional[ArrayLike] = None) -> Tuple[LogProposal, ProposalSampler, ArrayLike]:
+    Sigma = jnp.atleast_2d(Sigma)
+    chol = jnp.linalg.cholesky(Sigma)
+    dim = chol.shape[-1]
+    m = jnp.reshape(jnp.asarray(m, dtype=chol.dtype), ())
+    s = jnp.sqrt(jnp.maximum(1.0 - m ** 2, 1e-12)) if sigma is None else jnp.reshape(
+        jnp.asarray(sigma, dtype=chol.dtype), ())
+    inv_var = 1.0 / s ** 2
+    log_norm_const = (-0.5 * dim * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diagonal(chol)))
+                      + dim * jnp.log(2.0) - dim * jnp.log(s) - 0.5 * dim * m ** 2 * inv_var)
+    grad_log_tgt_fn = jax.grad(log_tgt_density_fn)
+
+    def whitened_grad(x):
+        return chol.T @ grad_log_tgt_fn(x)
+
+    def log_cosh(t):
+        abs_t = jnp.abs(t)
+        return abs_t + jnp.log1p(jnp.exp(-2.0 * abs_t)) - jnp.log(2.0)
+
+    def bimodal_barker_log_proposal(x, y):
+        z = jax.scipy.linalg.solve_triangular(chol, y - x, lower=True)
+        return (log_norm_const - 0.5 * inv_var * jnp.sum(jnp.square(z))
+                + jnp.sum(log_cosh(z * m * inv_var))
+                + jnp.sum(jax.nn.log_sigmoid(z * whitened_grad(x))))
+
+    def bimodal_barker_sampler(key, x):
+        key_xi, key_eps, key_b = jax.random.split(key, 3)
+        eps = jnp.where(jax.random.uniform(key_eps, (dim,)) < 0.5, -1.0, 1.0)
+        z = m * eps + s * jax.random.normal(key_xi, (dim,))
+        u = jax.random.uniform(key_b, (dim,))
+        b = jnp.where(u < jax.nn.sigmoid(z * whitened_grad(x)), 1.0, -1.0)
+        return x + chol @ (b * z)
+
+    return bimodal_barker_log_proposal, bimodal_barker_sampler, jnp.empty(1)
