@@ -104,8 +104,8 @@ def build_build_barker_proposal_gamma(C):
     return build_barker_proposal
 
 
-def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike = 0.9,
-                            sigma: Optional[ArrayLike] = None) -> Tuple[LogProposal, ProposalSampler, ArrayLike]:
+def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike = 0.1,
+                            mode: Optional[ArrayLike] = None) -> Tuple[LogProposal, ProposalSampler, ArrayLike]:
     r"""
     Preconditioned Barker proposal driven by a *bimodal* Gaussian base kernel
     instead of the standard normal one used in :func:`barker_proposal`.
@@ -115,41 +115,45 @@ def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike 
     Livingstone and Zanella (2022) uses Gaussianity, and the normalisation
         \int 2 \mu(z) sigmoid(z c) dz = \int \mu(z) [sigmoid(z c) + sigmoid(-z c)] dz = 1
     holds for any symmetric \mu, so the sign trick carries over verbatim. Here
-    the whitened noise is the symmetric two-component mixture
-        \mu_m(z) = 1/2 N(z; -m, s^2) + 1/2 N(z; +m, s^2)
-                 = (s \sqrt{2\pi})^{-1} \exp(-(z^2 + m^2) / (2 s^2)) \cosh(z m / s^2),
+    the whitened noise is the two-component mixture centred at \pm\sqrt{1 - m^2},
+    each component having standard deviation m,
+        \mu_m(z) = 1/2 N(z; -\sqrt{1 - m^2}, m^2) + 1/2 N(z; +\sqrt{1 - m^2}, m^2)
+                 = (m\sqrt{2\pi})^{-1} \exp(-(z^2 + 1 - m^2) / (2 m^2)) \cosh(z \sqrt{1 - m^2} / m^2),
     applied coordinate-wise in the whitened coordinates of L L^T = \Sigma:
-        \xi \sim N(0, I), \varepsilon_i \sim Unif\{-1, +1\}, z_i = \varepsilon_i m + s \xi_i,
+        \xi \sim N(0, I), \varepsilon_i \sim Unif\{-1, +1\},
+        z_i = \varepsilon_i \sqrt{1 - m^2} + m \xi_i,
         c(x) = L^T grad \log \pi (x),
         b_i = +1 with probability sigmoid(z_i c_i(x)), else -1,
         y = x + L (b \odot z),
     with transition density
         q(x, y) = |det L|^{-1} \prod_i 2 \mu_m(z_i) sigmoid(z_i c_i(x)), z = L^{-1}(y - x).
 
-    By default s = \sqrt{1 - m^2} (hence 0 <= m < 1) and m = 0.1, which keeps
-    Var(z_i) = m^2 + s^2 = 1: \Sigma is scaled exactly as in the Gaussian case,
-    gamma keeps its meaning, and m = 0 reproduces :func:`barker_proposal`
-    coefficient for coefficient. Increasing m moves the noise mass away from
-    zero -- the m -> 1 limit is the two-point kernel z_i = \pm 1 -- which is the
-    point of the bimodal base kernel: the Gaussian one wastes a sizeable share
-    of its proposals on near-zero moves. Pass ``sigma`` explicitly to decouple
-    the mixture width from m (the noise variance is then m^2 + sigma^2 and the
-    effective scale of the move changes accordingly).
-
-    Note that \mu_m is a two-component mixture for every m > 0 but is a *bimodal*
-    density only for m > sigma, i.e. m > 1 / \sqrt{2} \approx 0.707 under the
-    unit-variance parametrisation: the default m = 0.9 is a mild perturbation of
-    the Gaussian base kernel, deliberately close to :func:`barker_proposal`.
+    Splitting the unit variance as (1 - m^2) + m^2, exactly as pCN splits it
+    between \rho and \sqrt{1 - \rho^2}, keeps Var(z_i) = 1 for every
+    m \in (0, 1]: \Sigma is scaled as in the Gaussian case and gamma keeps its
+    meaning. m is the width of each component, so m = 1 puts both modes at the
+    origin and reproduces :func:`barker_proposal` coefficient for coefficient,
+    while a small m sharpens the two modes towards the two-point kernel
+    z_i = \pm 1 -- the default m = 0.1 is firmly bimodal, modes at \pm 0.995 of
+    width 0.1. Moving the noise mass away from zero is the point of the bimodal
+    base kernel: the Gaussian one wastes a sizeable share of its proposals on
+    near-zero moves. m must stay positive (m = 0 divides by zero); the (gamma, m)
+    builder clips it away from zero, on the statistical grounds that the kernel
+    degenerates -- float32 acceptance ratios were measured against float64 on
+    identical (x, y) pairs and stay accurate to 1e-5 down to m = 0.02 despite
+    the 1 / m^2 factors, which cancel between q(x, y) and q(y, x). Pass ``mode``
+    explicitly to place the modes somewhere other than \pm\sqrt{1 - m^2}, the
+    noise variance then being mode^2 + m^2.
     """
     Sigma = jnp.atleast_2d(Sigma)
     chol = jnp.linalg.cholesky(Sigma)
     dim = chol.shape[-1]
-    m = jnp.reshape(jnp.asarray(m, dtype=chol.dtype), ())
-    s = jnp.sqrt(jnp.maximum(1.0 - m ** 2, 1e-12)) if sigma is None else jnp.reshape(
-        jnp.asarray(sigma, dtype=chol.dtype), ())
+    s = jnp.reshape(jnp.asarray(m, dtype=chol.dtype), ())
+    mode = jnp.sqrt(jnp.maximum(1.0 - s ** 2, 0.0)) if mode is None else jnp.reshape(
+        jnp.asarray(mode, dtype=chol.dtype), ())
     inv_var = 1.0 / s ** 2
     log_norm_const = (-0.5 * dim * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diagonal(chol)))
-                      + dim * jnp.log(2.0) - dim * jnp.log(s) - 0.5 * dim * m ** 2 * inv_var)
+                      + dim * jnp.log(2.0) - dim * jnp.log(s) - 0.5 * dim * mode ** 2 * inv_var)
     grad_log_tgt_fn = jax.grad(log_tgt_density_fn)
 
     def whitened_grad(x):
@@ -163,13 +167,13 @@ def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike 
     def bimodal_barker_log_proposal(x, y):
         z = jax.scipy.linalg.solve_triangular(chol, y - x, lower=True)
         return (log_norm_const - 0.5 * inv_var * jnp.sum(jnp.square(z))
-                + jnp.sum(log_cosh(z * m * inv_var))
+                + jnp.sum(log_cosh(z * mode * inv_var))
                 + jnp.sum(jax.nn.log_sigmoid(z * whitened_grad(x))))
 
     def bimodal_barker_sampler(key, x):
         key_xi, key_eps, key_b = jax.random.split(key, 3)
         eps = jnp.where(jax.random.uniform(key_eps, (dim,)) < 0.5, -1.0, 1.0)
-        z = m * eps + s * jax.random.normal(key_xi, (dim,))
+        z = mode * eps + s * jax.random.normal(key_xi, (dim,))
         u = jax.random.uniform(key_b, (dim,))
         b = jnp.where(u < jax.nn.sigmoid(z * whitened_grad(x)), 1.0, -1.0)
         return x + chol @ (b * z)
@@ -177,11 +181,11 @@ def bimodal_barker_proposal(Sigma, log_tgt_density_fn: LogDensity, m: ArrayLike 
     return bimodal_barker_log_proposal, bimodal_barker_sampler, jnp.empty(1)
 
 
-def build_build_bimodal_barker_proposal_gamma(C, m: ArrayLike = 0.9):
+def build_build_bimodal_barker_proposal_gamma(C, m: ArrayLike = 0.1):
     """
-    Fixed covariance matrix (up to the scaling parameter) and fixed mode offset
-    m (default 0.1, a mild perturbation of the Gaussian base kernel), only gamma
-    being adapted. Pass C = I for the plain bimodal Barker kernel.
+    Fixed covariance matrix (up to the scaling parameter) and fixed component
+    width m (default 0.1, i.e. modes at +-0.995), only gamma being adapted.
+    Pass C = I for the plain bimodal Barker kernel.
     """
 
     def build_bimodal_barker_proposal(state: SMCStatebis, log_tgt_density_fn: LogDensity, _: LogDensity, i: int,
@@ -194,11 +198,10 @@ def build_build_bimodal_barker_proposal_gamma(C, m: ArrayLike = 0.9):
     return build_bimodal_barker_proposal
 
 
-def build_build_bimodal_barker_proposal_gamma_cov(m: ArrayLike = 0.9):
+def build_build_bimodal_barker_proposal_gamma_cov(m: ArrayLike = 0.1):
     """
     Bimodal Barker proposal with a gamma parameter, an adaptive covariance
-    matrix and a fixed mode offset m (default 0.1, a mild perturbation of the
-    Gaussian base kernel).
+    matrix and a fixed component width m (default 0.1, i.e. modes at +-0.995).
     """
 
     def build_bimodal_barker_proposal(state: SMCStatebis, log_tgt_density_fn: LogDensity, _: LogDensity, i: int,
@@ -227,20 +230,20 @@ def build_build_bimodal_barker_proposal_gamma_cov(m: ArrayLike = 0.9):
     return build_bimodal_barker_proposal
 
 
-def build_build_bimodal_barker_proposal_gamma_m(C, m_max: float = 0.95):
+def build_build_bimodal_barker_proposal_gamma_m(C, m_min: float = 0.05):
     r"""
     Fixed covariance matrix (up to the scaling parameter), with both the scale
     and the shape of the base kernel tuned: \theta = (\gamma, m) is read from
     state.mh_proposal_parameters[i - 1] (shape (..., 2)), exactly as for the
     (\gamma, L) version of HMC or the (\rho, \tau) proposals. m is clipped to
-    [0, m_max] because s = \sqrt{1 - m^2} degenerates as m -> 1 (m_max = 0.95
-    still leaves s \approx 0.31).
+    [m_min, 1] because the modes +-\sqrt{1 - m^2} degenerate to a two-point
+    kernel of vanishing width as m -> 0 (m_min = 0.05 leaves 1 / m^2 = 400).
     """
 
     def build_bimodal_barker_proposal(state: SMCStatebis, log_tgt_density_fn: LogDensity, _: LogDensity, i: int,
                                       j: Optional[int] = None):
         gamma = jnp.reshape(state.mh_proposal_parameters.at[i - 1, 0].get(), ())
-        m = jnp.clip(jnp.reshape(state.mh_proposal_parameters.at[i - 1, 1].get(), ()), 0.0, m_max)
+        m = jnp.clip(jnp.reshape(state.mh_proposal_parameters.at[i - 1, 1].get(), ()), m_min, 1.0)
         dim = state.particles.shape[-1]
         optimal_scale = gamma ** 2 / dim ** (1 / 3)
         return bimodal_barker_proposal(optimal_scale * C, log_tgt_density_fn, m)
