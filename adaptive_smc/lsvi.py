@@ -1,31 +1,23 @@
 """
 Least-Squares Variational Inference (LSVI), dense Gaussian scheme.
 
-    Le Fay Y., Chopin N., Barthelme S., "Least Squares Variational Inference",
-    NeurIPS 2025, arXiv:2502.18475 -- Section 4, Alg. 3.
+    Le Fay Y., Chopin N., Barthelme S., "Least Squares Variational Inference", NeurIPS 2025, arXiv:2502.18475 -- Section 4, Alg. 3.
 
-Derived from the reference implementation at https://github.com/ylefay/LSVI
-(Copyright the LSVI authors, Apache-2.0); rewritten in matrix form and reduced
-to the Gaussian case.  Vendored rather than imported because the package pulls
-in pymc / blackjax / particles>=0.4 as hard dependencies.
+Derived from the reference implementation at https://github.com/ylefay/LSVI (Copyright the LSVI authors, Apache-2.0); 
+rewritten in matrix form and reduced to the Gaussian case. 
 
-`lsvi_gaussian_approximation` is a drop-in replacement for
-`adaptive_smc.laplace.laplace_approximation`: same `(-log_density(m), m, C)`
-return signature, so it can be swapped in wherever a Gaussian reference /
-base measure is built.
+`lsvi_gaussian_approximation` is a drop-in replacement for `adaptive_smc.laplace.laplace_approximation`: same `(-log_density(m), m, C)` return signature, 
+so it can be swapped in wherever a Gaussian reference / base measure is built.
 
-The sweep, in one line: with the current q = N(mu, Sigma) and Sigma = S S,
-project y(z) = log pi~(mu + S z) onto the quadratics in L2(N(0, I)).  The basis
-1, z_i, (z_i^2 - 1)/sqrt(2), z_i z_j is orthonormal there, so the projection is
-just moments -- with s = E[y], v = E[y z], M = E[y z z^T],
+The sweep, in one line: with the current q = N(mu, Sigma) and Sigma = S S, project y(z) = log pi~(mu + S z) onto the quadratics in L2(N(0, I)).  
+The basis 1, z_i, (z_i^2 - 1)/sqrt(2), z_i z_j is orthonormal there, so the projection is just moments -- with s = E[y], v = E[y z], M = E[y z z^T],
 
     quadratic coefficient   C2     = (M - s I) / 2
     new precision           Lambda = -2 S^-1 C2 S^-1
     new precision * mean    h      = Lambda mu + S^-1 v
 
-which is what upstream's Appendix-D.4 gamma -> eta chain computes with vec/kron
-plumbing (verified equal analytically and numerically).  The intercept of the
-regression never enters, so it is dropped.
+which is what upstream's Appendix-D.4 gamma -> eta chain computes with vec/kron plumbing (verified equal analytically and numerically).  
+The intercept of the regression never enters, so it is dropped.
 
 Requires float64 (`jax.config.update("jax_enable_x64", True)`).
 """
@@ -53,23 +45,17 @@ def lsvi_gaussian_approximation(log_density: Callable,
 
     Parameters
     ----------
-    init_mean, init_cov : seed of the variational family.  Seeding with the
-        Laplace approximation converges in far fewer sweeps than with the prior;
-        both land in the same place.
+    init_mean, init_cov : seed of the variational family.  Seeding with the Laplace approximation converges in far fewer sweeps than with the prior; both land in the same place.
     lr_schedule : float or (n_iter,) array, the damping factor.
-    target_residual_schedule : None (disabled), float or (n_iter,) array.  Caps the
-        variance of the regression residual; a step exceeding it is shrunk by
-        sqrt(target / residual).  This is what keeps the scheme stable at lr = 1:
-        with `None` the iterates random-walk around the optimum instead of settling.
-    batch_size : samples per chunk of the MC sums (`jnp.inf` = one shot, the house
-        default); peak memory ~ batch_size * d.  Must divide `n_samples`.  Unlike
-        `utils.apply_vmap_batch`, the chunks are drawn inside the loop rather than
-        sliced out of a materialised array -- at d = 167, n_samples = 1e6 the array
+    target_residual_schedule : None (disabled), float or (n_iter,) array.  
+        Caps the variance of the regression residual; a step exceeding it is shrunk by sqrt(target / residual).  
+        This is what keeps the scheme stable at lr = 1: with `None` the iterates random-walk around the optimum instead of settling.
+    batch_size : samples per chunk of the MC sums (`jnp.inf` = one shot, the house default); peak memory ~ batch_size * d.  Must divide `n_samples`.  
+        Unlike `utils.apply_vmap_batch`, the chunks are drawn inside the loop rather than sliced out of a materialised array -- at d = 167, n_samples = 1e6 the array
         of standardised samples alone would be 1.3 GB.
 
-    Choosing `n_samples`: the dense family has d(d+1)/2 free parameters and the
-    sweep uses moments rather than OLS, so the fit degrades when n_samples is only
-    a small multiple of that.  Measured on logistic posteriors (ELBO, 12-30 sweeps):
+    Choosing `n_samples`: the dense family has d(d+1)/2 free parameters and the sweep uses moments rather than OLS, 
+    so the fit degrades when n_samples is only a small multiple of that.  Measured on logistic posteriors (ELBO, 12-30 sweeps):
 
         d    d(d+1)/2   n_samples   ELBO(lsvi)   ELBO(laplace)
         61      1 891      20 000      -471.5        -330.0   diverged
@@ -78,9 +64,8 @@ def lsvi_gaussian_approximation(log_density: Callable,
        167     14 028     100 000      -790.0        -666.5   diverged
        167     14 028   1 000 000      -580.8        -666.5   ok
 
-    Rule of thumb: n_samples >~ 50 * d(d+1)/2 (~25 d^2).  Below ~10x, LSVI is
-    *worse* than the Laplace approximation it started from.  lr = 1 with
-    target_residual = 10 beat a decaying lr at every (d, n_samples) tested.
+    Rule of thumb: n_samples >~ 50 * d(d+1)/2 (~25 d^2).  Below ~10x, LSVI is worse than the Laplace approximation it started from.  
+    lr = 1 with target_residual = 10 beat a decaying lr at every (d, n_samples) tested.
 
     Returns
     -------
@@ -124,10 +109,8 @@ def lsvi_gaussian_approximation(log_density: Callable,
     def residual(k, ys, h, P):
         """
         Damping statistic of Alg. 3, reproduced exactly as upstream computes it:
-        Var_z[ y(z) - eta . s(z) ], with eta the *x-space* natural parameter
-        (h, -vec(P)/2) applied to the standardised statistic s(z) = (z, vec(zz'), 1).
-        Not the z-space regression residual -- but `target_residual` is a tuned
-        constant on this scale, so keep the two consistent.  No target evals.
+        Var_z[ y(z) - eta . s(z) ], with eta the *x-space* natural parameter (h, -vec(P)/2) applied to the standardised statistic s(z) = (z, vec(zz'), 1).
+        Not the z-space regression residual -- but `target_residual` is a tuned constant on this scale, so keep the two consistent.  No target evals.
         """
         def body(acc, ky):
             kb, y = ky
