@@ -54,18 +54,8 @@ def lsvi_gaussian_approximation(log_density: Callable,
         Unlike `utils.apply_vmap_batch`, the chunks are drawn inside the loop rather than sliced out of a materialised array -- at d = 167, n_samples = 1e6 the array
         of standardised samples alone would be 1.3 GB.
 
-    Choosing `n_samples`: the dense family has d(d+1)/2 free parameters and the sweep uses moments rather than OLS, 
-    so the fit degrades when n_samples is only a small multiple of that.  Measured on logistic posteriors (ELBO, 12-30 sweeps):
-
-        d    d(d+1)/2   n_samples   ELBO(lsvi)   ELBO(laplace)
-        61      1 891      20 000      -471.5        -330.0   diverged
-        61      1 891     100 000      -313.1        -330.0   ok
-        61      1 891     400 000      -297.5        -330.0   good
-       167     14 028     100 000      -790.0        -666.5   diverged
-       167     14 028   1 000 000      -580.8        -666.5   ok
-
-    Rule of thumb: n_samples >~ 50 * d(d+1)/2 (~25 d^2).  Below ~10x, LSVI is worse than the Laplace approximation it started from.  
-    lr = 1 with target_residual = 10 beat a decaying lr at every (d, n_samples) tested.
+    Choosing `n_samples`: this is the parameter that matters, and the binding constraint is Monte-Carlo noise in the moment estimator.
+    At d = 8 (36 parameters) 20 000 samples, 555x the count, still left the fit 26-97% over-dispersed.  
 
     Returns
     -------
