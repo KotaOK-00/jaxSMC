@@ -67,7 +67,7 @@ def build_MALA_proposal_gamma_cov_grad(state: SMCStatebis, log_tgt_density_fn: L
 
     cov_hat = fun_to_be_called_if_j_greater_than_one()
     scaled_cov_hat = cov_hat * gamma ** 2 / dim ** (1 / 3)
-    return MALA_proposal(scaled_cov_hat, log_tgt_density_fn)
+    return MALA_proposal_grad(scaled_cov_hat, log_tgt_density_fn)
 
 
 def build_build_MALA_proposal_gamma_grad(C):
