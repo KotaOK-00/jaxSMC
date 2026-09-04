@@ -10,44 +10,21 @@ logistic = jax.scipy.special.expit
 def normal_cdf(x):
     return 0.5 * (1 + jax.scipy.special.erf(x / jnp.sqrt(2)))
 
-def make_robit_logcdf(df: float = 7.0, scale: float = 1.5484):
-    """log F_nu(x / scale), F_nu = Student-t(df) CDF.
- 
-    z_i ~ t_nu(x_i'beta, scale), y_i = 1{z_i > 0}
-    P(y_i = 1 | beta) = F_nu(x_i'beta / scale)。
- 
-    df=7, scale=1.5484 (Liu 2004): beta has the same scale as logistic
- 
-      - jax.scipy.stats.t does not have cdf nor logcdf (only logpdf and pdf);
-            we define F(t) = 0.5 * I_z(nu/2, 1/2), z = nu/(nu+t^2) if t<=0.
+def make_robit_logcdf(df=7.0, scale=1.5484):
+    """Student-t(df) CDF in closed form, df = odd integer:
+        F(t) = 1/2 + (theta + sin(theta) cos(theta) P(cos^2 theta)) / pi,  theta = arctan(t / sqrt(df))
+        P(w) = sum_{j<(df-1)/2} c_j w^j,  c_0 = 1,  c_j = c_{j-1} * 2j / (2j+1)
     """
-    nu, s = float(df), float(scale)
-    a, b = 0.5 * nu, 0.5
-    logC = gammaln(0.5 * (nu + 1.0)) - gammaln(0.5 * nu) - 0.5 * jnp.log(nu * jnp.pi)
- 
-    def _val(u):
-        z = nu / (nu + u * u)
-        Iz = betainc(a, b, z) # = 2 * F_nu(-|u|)
-        return jnp.where(
-            u <= 0.0,
-            jnp.log(jnp.clip(Iz, 1e-300, 1.0)) - jnp.log(2.0),   # log F(u)
-            jnp.log1p(-0.5 * Iz),                                # log(1 - F(-u))
-        )
- 
-    def _logpdf(u):
-        return logC - 0.5 * (nu + 1.0) * jnp.log1p(u * u / nu)
- 
-    @jax.custom_jvp
-    def robit_logcdf(x):
-        return _val(x / s)
- 
-    @robit_logcdf.defjvp
-    def _robit_logcdf_jvp(primals, tangents):
-        (x,), (dx,) = primals, tangents
-        v = robit_logcdf(x)
-        return v, jnp.exp(_logpdf(x / s) - v) / s * dx
- 
-    return robit_logcdf
+    m = (int(df) - 1) // 2
+    coef, c = [], 1.0
+    for j in range(m):
+        coef.append(c); c *= (2*j + 2) / (2*j + 3)
+    def logcdf(x):
+        th = jnp.arctan(x / (scale * jnp.sqrt(df)))
+        c, s = jnp.cos(th), jnp.sin(th)
+        w = c * c
+        return jnp.log(0.5 + (th + s * c * sum(cj * w**j for j, cj in enumerate(coef))) / jnp.pi)
+    return logcdf
 
 def get_log_likelihood(flipped_predictors, cdf=logistic, logcdf=None):
     """
