@@ -244,10 +244,8 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         log_weights = jnp.zeros((iteration + 1, num_parallel_chain, P))
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -667,10 +665,8 @@ class GenericAdaptiveWasteFreeTemperingSMC:
         log_weights = jnp.zeros((2, num_parallel_chain, P), dtype=jnp.bfloat16 if b16 else None)
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1026,10 +1022,8 @@ class GenericWasteFreeTemperingSMC:
         log_weights = jnp.zeros((iteration + 1, num_parallel_chain, P))
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1194,10 +1188,8 @@ class GenericWasteFreeTemperingSMC:
         log_weights = jnp.zeros((1, num_parallel_chain, P))
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1401,10 +1393,8 @@ class GenericTemperingSMC:
         log_weights = jnp.zeros((iteration + 1, num_parallel_chain, 1))
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1569,10 +1559,8 @@ class GenericTemperingSMC:
         log_weights = jnp.zeros((1, num_parallel_chain, 1))
 
         if target_ess:
-            _log_weights = self.vmapped_log_likelihood_fn(init_particles)
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                self.vmapped_log_likelihood_fn(init_particles), target_ess, 1.0)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1783,9 +1771,8 @@ class GenericGreedyWasteFreeTemperingSMC:
             mask = p_idx <= num_mcmc_steps_schedule[0]
             _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                _log_weights, target_ess, 1.0, num_mcmc_steps_schedule[0] * num_parallel_chain)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
@@ -1972,9 +1959,8 @@ class GenericGreedyWasteFreeTemperingSMC:
             mask = p_idx <= num_mcmc_steps_schedule[0]
             _log_weights = jnp.where(mask[None, :], _log_weights, -jnp.inf)
 
-            eps = 1e-2
-            dlmbda = dichotomy(lambda dlmbda: log_ess(dlmbda, _log_weights, num_mcmc_steps_schedule[0] * num_parallel_chain) - jnp.log(target_ess), 0. + eps, 1.0, eps,
-                               10)
+            dlmbda = solve_tempering_increment(
+                _log_weights, target_ess, 1.0, num_mcmc_steps_schedule[0] * num_parallel_chain)
             dlmbda = jnp.clip(dlmbda, 0., 1.0)
             tempering_sequence = tempering_sequence.at[0].set(dlmbda)
             diff_tempering_sequence = diff_tempering_sequence.at[0].set(dlmbda)
