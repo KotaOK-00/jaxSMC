@@ -141,3 +141,7 @@ def dichotomy(fun, min_delta, max_delta, eps=1e-4, max_iter=100):
         if_opt,
         None,
     )
+
+def solve_tempering_increment(log_lik, target_ess, max_delta, N_particles=None, min_delta=1e-12, tol=1e-5, max_iter=100):
+    fun = lambda d: log_ess(d, log_lik, N_particles) - jnp.log(target_ess)
+    return dichotomy(fun, min_delta, max_delta, tol, max_iter)
