@@ -439,6 +439,7 @@ class GenericAdaptiveWasteFreeTemperingSMC:
             new_particles = new_couple_particles.at[..., 0, :].get()
             new_proposed_particles = new_couple_particles.at[..., 1, :].get()
             particles = particles.at[i].set(new_particles)
+            proposed_particles = proposed_particles.at[i].set(new_proposed_particles)
             if target_ess:
                 lam_prev = tempering_sequence.at[i - 1].get()
                 dlmbda = solve_tempering_increment(
