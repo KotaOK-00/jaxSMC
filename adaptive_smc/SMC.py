@@ -2,7 +2,7 @@ from typing import Tuple, Optional
 
 import jax.random
 from blackjax.smc.resampling import multinomial
-from blackjax.smc.solver import dichotomy
+# from blackjax.smc.solver import dichotomy    # the new function is defined in utils.py
 from jax import numpy as jnp
 from jax.typing import ArrayLike
 
@@ -10,7 +10,7 @@ from adaptive_smc.criteria_functions import square_distance
 from adaptive_smc.metropolis import accept_reject_mh_step
 from adaptive_smc.optimise import OptimisingProcedure, make_constant
 from adaptive_smc.smc_types import CriteriaFunction, SMCStatebis, Sampler, LogDensity, PRNGKey, ProposalBuilder
-from adaptive_smc.utils import log_ess, normalize_log_weights, apply_vmap_batch
+from adaptive_smc.utils import log_ess, normalize_log_weights, apply_vmap_batch, solve_tempering_increment
 
 
 class GenericAdaptiveWasteFreeTemperingSMC:
